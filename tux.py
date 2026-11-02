@@ -6,6 +6,7 @@ GNOME Help, man pages and your own notes. The model server only runs while
 you're asking things and stops after IDLE_SECS idle (and when Tux closes).
 Run setup_tux.py once to build tux-art.png and index.json.
 """
+import ast
 import ctypes
 import glob
 import json
@@ -188,6 +189,67 @@ def fill_quick(answer, q):
 
 TIP_WORDS = re.compile(r"\b(tips?|tricks?|hacks?|super ?user|power ?user|pro moves?|"
                        r"something cool|teach me|surprise me)\b", re.I)
+
+# ---------------------------------------------------------------- optional: perch on the dock
+# Wayland apps can't keep themselves on top, so this is a tiny GNOME extension. Nothing is
+# installed unless you pick it from Tux's options; Tux then walks you through it.
+PERCH_UUID = "tux-perch@hartj77-blip"
+PERCH_SRC = os.path.join(HERE, "extension", PERCH_UUID)
+PERCH_DRYRUN = bool(os.environ.get("TUX_PERCH_DRYRUN"))  # tests: change nothing real
+PERCH_WORDS = re.compile(r"\b(on top|always visible|stay visible|pin (yourself|you)|perch|"
+                         r"(sit|stand|stay|live) on (the|my) (dock|taskbar|toolbar|panel))\b", re.I)
+
+
+def _perch_dir():
+    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return os.path.join(base, "gnome-shell", "extensions", PERCH_UUID)
+
+
+def _enabled_extensions():
+    out = subprocess.run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
+                         capture_output=True, text=True).stdout.strip()
+    try:
+        return list(ast.literal_eval(out.removeprefix("@as ") or "[]"))
+    except (ValueError, SyntaxError):
+        return []
+
+
+def _set_enabled_extensions(exts):
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(exts)])
+
+
+def perch_state():
+    """'unsupported' (not GNOME), 'off', 'pending' (needs a log out/in) or 'on'."""
+    if PERCH_DRYRUN:
+        return os.environ.get("TUX_PERCH_DRYRUN", "off")
+    if "GNOME" not in os.environ.get("XDG_CURRENT_DESKTOP", "").upper() or \
+            not shutil.which("gnome-extensions") or not os.path.isdir(PERCH_SRC):
+        return "unsupported"
+    if not os.path.isdir(_perch_dir()) or PERCH_UUID not in _enabled_extensions():
+        return "off"
+    info = subprocess.run(["gnome-extensions", "info", PERCH_UUID],
+                          capture_output=True, text=True).stdout
+    return "on" if re.search(r"State:\s*(ACTIVE|ENABLED)", info) else "pending"
+
+
+def perch_install():
+    if PERCH_DRYRUN:
+        return
+    shutil.copytree(PERCH_SRC, _perch_dir(), dirs_exist_ok=True)
+    subprocess.run(["gnome-extensions", "enable", PERCH_UUID], capture_output=True)
+    exts = _enabled_extensions()  # GNOME only discovers new extensions at login
+    if PERCH_UUID not in exts:
+        _set_enabled_extensions(exts + [PERCH_UUID])
+
+
+def perch_remove():
+    if PERCH_DRYRUN:
+        return
+    subprocess.run(["gnome-extensions", "disable", PERCH_UUID], capture_output=True)
+    exts = _enabled_extensions()
+    if PERCH_UUID in exts:
+        _set_enabled_extensions([e for e in exts if e != PERCH_UUID])
+    shutil.rmtree(_perch_dir(), ignore_errors=True)
 
 # design space: everything is laid out in a 320 x 430 box and scaled
 DW, DH = 320.0, 430.0
@@ -457,6 +519,8 @@ def parse_answer(text):
             blocks.append(("clip", line))
         elif line.startswith("⌨ "):
             blocks.append(("ctx", line))
+        elif line.startswith("▸ "):
+            blocks.append(("action", line[2:].strip()))
         elif line.strip():
             blocks.append(("text", line.strip()))
     return blocks
@@ -492,11 +556,12 @@ class Tux(Gtk.ApplicationWindow):
         self.art = cairo.ImageSurface.create_from_png(ART_PNG)
         self.art_runs = json.load(open(ART_JSON))["runs"]
         self.history = []
-        self.bubble_text = self.kb.tip() + "\n\nAsk me anything. Click my belly or just type."
+        self.bubble_text = self.kb.tip() + "\n\nAsk me anything: click my belly or just type. Right-click me for options."
         self.help_uri = None
         self.clip = None             # clipboard text attached to the next question
         self.clip_seen = None        # last clipboard text we looked at
         self.clip_primed = False     # startup clipboard is old news, not a question
+        self.actions = {}            # "▸ label" lines in the bubble -> what clicking does
         self.last_copied = None      # what Tux itself copied (never fed back in)
         self.gen = 0
         self.idle_src = None
@@ -539,7 +604,7 @@ class Tux(Gtk.ApplicationWindow):
         click.connect("pressed", self.on_press)
         self.area.add_controller(click)
         rclick = Gtk.GestureClick(button=3)  # right-click the bubble: copy the whole answer
-        rclick.connect("pressed", lambda *_: self.copy_answer())
+        rclick.connect("pressed", self.on_rclick)  # bubble: copy answer; Tux: options
         self.area.add_controller(rclick)
         # coming back to Tux (e.g. after copying an error): look at the clipboard
         self.connect("notify::is-active", lambda *_: self.is_active() and self.check_clipboard())
@@ -684,6 +749,8 @@ class Tux(Gtk.ApplicationWindow):
                     lay.set_markup(f"<span foreground='#8a4b00'>{esc(txt)}</span>", -1)
                 elif kind == "ctx":
                     lay.set_markup(f"<span foreground='#666666'><small>{esc(txt)}</small></span>", -1)
+                elif kind == "action":
+                    lay.set_markup(f"<span foreground='#1a5fb4'><b>▸ {esc(txt)}</b></span>", -1)
                 else:
                     lay.set_markup(inline_markup(txt), -1)
                 lh = lay.get_pixel_size()[1] + (8 * s if kind == "cmd" else 0)
@@ -707,6 +774,8 @@ class Tux(Gtk.ApplicationWindow):
                     self.boxes.append((X + pad, y, tw, lh, "help", self.help_uri))
                 elif kind == "clip":
                     self.boxes.append((X + pad, y, tw, lh, "clip", None))
+                elif kind == "action":
+                    self.boxes.append((X + pad, y, tw, lh, "action", txt))
                 cr.set_source_rgb(0.08, 0.08, 0.1)
                 cr.move_to(X + pad, y)
             PangoCairo.show_layout(cr, lay)
@@ -792,6 +861,10 @@ class Tux(Gtk.ApplicationWindow):
                     self.copy(payload)
                 elif kind == "clip":
                     self.drop_clip()
+                elif kind == "action":
+                    fn = self.actions.get(payload)
+                    if fn:
+                        fn()
                 elif payload:
                     subprocess.Popen(["yelp", payload], start_new_session=True,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -799,7 +872,7 @@ class Tux(Gtk.ApplicationWindow):
         b = BUBBLE
         if self.bubble_on() and b[0] <= dx <= b[0] + b[2] and b[1] <= dy <= b[1] + b[3]:
             if not self.history:  # still on the tip screen: show another tip
-                self.say(self.kb.tip() + "\n\nAsk me anything. Click my belly or just type.")
+                self.say(self.kb.tip() + "\n\nAsk me anything: click my belly or just type. Right-click me for options.")
             return
         cx, cy, rx, ry = BELLY
         if math.hypot((dx - cx) / rx, (dy - cy) / ry) <= 1 and n_press == 1:
@@ -886,6 +959,87 @@ class Tux(Gtk.ApplicationWindow):
         self.clip = None
         self.say("Clipboard dropped. Ask away.")
 
+    # ---- options + guided setups (clickable "▸" lines in the bubble)
+    def say_actions(self, text, actions):
+        self.actions = dict(actions)
+        self.say(text + "".join(f"\n▸ {label}" for label, _ in actions))
+
+    def on_rclick(self, _gesture, _n, x, y):
+        self.touch()
+        dx, dy = self.to_design(x, y)
+        bx, by, bw, bh = BUBBLE
+        if self.bubble_on() and bx <= dx <= bx + bw and by <= dy <= by + bh:
+            self.copy_answer()
+        else:
+            self.show_options()
+
+    def show_options(self):
+        dock = {"off": "Stand on my dock (always on top)…",
+                "pending": "Finish the dock setup…",
+                "on": "Stop standing on the dock"}.get(perch_state(), "Stay on top of windows…")
+        self.say_actions("Options:", [
+            (dock, self.perch_offer),
+            ("Show me a power tip", lambda: self.say(self.kb.tip())),
+            ("Tuck my bubble away", self.tuck_bubble),
+        ])
+
+    def tuck_bubble(self):
+        self.last_activity = 0
+        self.pointer_in = False
+
+    def perch_offer(self):
+        state = perch_state()
+        if state == "unsupported":
+            self.say("Staying on top needs the GNOME desktop. On other desktops, use the window "
+                     "menu (often Alt+Space) → Always on Top.")
+        elif state == "off":
+            self.say_actions(
+                "Want me to stay on top of your windows, standing on your dock?\n"
+                "I need a tiny GNOME extension for that. You can undo it anytime.",
+                [("Set it up", self.perch_setup), ("Not now", self.perch_not_now)])
+        elif state == "pending":
+            self.say_actions(
+                "I'm set up and waiting for your next login.",
+                [("Log out now", self.perch_logout), ("Later", self.perch_later),
+                 ("Undo setup", self.perch_undo)])
+        else:
+            self.say_actions(
+                "I'm standing on your dock, on top of everything.",
+                [("Stop standing on the dock", self.perch_undo), ("Keep me here", lambda: self.say("👍"))])
+
+    def perch_setup(self):
+        try:
+            perch_install()
+        except Exception as e:
+            self.say(f"Setup didn't work: {e}")
+            return
+        self.say_actions(
+            "Done! GNOME only loads extensions at login, so log out and back in once "
+            "and I'll hop onto your dock.\nSave your work first.",
+            [("Log out now", self.perch_logout), ("Later", self.perch_later)])
+
+    def perch_logout(self):
+        if not PERCH_DRYRUN:  # GNOME shows its own "Log out?" confirmation
+            subprocess.Popen(["gnome-session-quit", "--logout"], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.say("See you on the dock! 🐧")
+
+    def perch_later(self):
+        self.say("Okay! I'll hop onto your dock next time you log in.")
+
+    def perch_not_now(self):
+        self.say("No problem. Right-click me any time to set it up.")
+
+    def perch_undo(self):
+        was_on = perch_state() == "on"
+        try:
+            perch_remove()
+        except Exception as e:
+            self.say(f"Couldn't undo it: {e}")
+            return
+        self.say("Done. I'm a normal window again." if was_on else
+                 "Setup undone. Nothing changes at your next login.")
+
     def say(self, text):
         if bool(text) != bool(self.bubble_text):
             self.region_key = None
@@ -911,6 +1065,9 @@ class Tux(Gtk.ApplicationWindow):
         self.gen += 1
         if self.idle_src:
             GLib.source_remove(self.idle_src); self.idle_src = None
+        if PERCH_WORDS.search(q) and not clip:  # "stay on top" / "sit on my dock"
+            self.perch_offer()
+            return
         if TIP_WORDS.search(q) and not clip:  # tips come from the curated list, instantly, no model
             self.say("Power moves:\n" + self.kb.tip(3))
             return
@@ -1043,6 +1200,17 @@ class App(Gtk.Application):
         if os.environ.get("TUX_ASK") is not None:
             GLib.timeout_add(500, lambda: (win.entry.set_text(os.environ["TUX_ASK"]),
                                            win.on_submit(win.entry), False)[-1])
+        # TUX_CLICKS="options|Set it up": open options, then click "▸" lines by label
+        for i, label in enumerate(filter(None, os.environ.get("TUX_CLICKS", "").split("|"))):
+            def click(label=label):
+                if label == "options":
+                    win.show_options()
+                elif label in win.actions:
+                    win.actions[label]()
+                else:
+                    print("no such option:", label, list(win.actions), flush=True)
+                return False
+            GLib.timeout_add(700 + 400 * i, click)
         if os.environ.get("TUX_SNAPSHOT"):
             GLib.timeout_add(int(os.environ.get("TUX_SNAPSHOT_MS", 1500)),
                              lambda: (snapshot(win, os.environ["TUX_SNAPSHOT"]), False)[-1])
