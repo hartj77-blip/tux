@@ -1,5 +1,5 @@
-bin/
-models/
+/bin
+/models
 __pycache__/
 index.json
 versions/
