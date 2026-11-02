@@ -1,4 +1,4 @@
-# 🐧 Tux
+# Tux
 
 A tiny, fully local Linux helper. Tux is a penguin-shaped desktop window with a
 speech bubble. Ask him anything about Linux and he answers in a line or two with
