@@ -489,11 +489,11 @@ class Layout:
     Mini Tux is drawn 1:1 in a window of exactly DW x DH."""
 
     def __init__(self, mode, edge, DW, DH, ART, BUBBLE, TAIL_TIP, ENTRY, BTN_MIN, BTN_CLOSE,
-                 GRIP=None, HOVER=None, TEXT_TOP=0):
+                 GRIP=None, HOVER=None, TEXT_TOP=0, FONT=12.5, SIDE="right"):
         self.mode, self.edge, self.DW, self.DH = mode, edge, DW, DH
         self.ART, self.BUBBLE, self.TAIL_TIP, self.ENTRY = ART, BUBBLE, TAIL_TIP, ENTRY
         self.BTN_MIN, self.BTN_CLOSE, self.GRIP = BTN_MIN, BTN_CLOSE, GRIP
-        self.HOVER, self.TEXT_TOP = HOVER, TEXT_TOP
+        self.HOVER, self.TEXT_TOP, self.FONT, self.SIDE = HOVER, TEXT_TOP, FONT, SIDE
 
     @property
     def BELLY(self):  # cx, cy, rx, ry: click here to type
@@ -517,38 +517,69 @@ class Layout:
 
 
 ART_W = 411  # width of the Tux picture
+BUBBLE_SIDES = ("right", "left", "above", "below")   # where the bubble sits, seen from Tux
 
 
-def side_layout(mode, edge, th, bw, bh, tux_side="left", valign="bottom", grip=False):
-    """Tux sits beside his speech bubble (🐧💬, or 💬🐧 with tux_side='right'). The text box
-    and the minimize/close buttons live inside the bubble."""
+def bubble_layout(mode, edge, side, th, bw, bh, grip=False, font=12.5, valign="bottom",
+                  halign="left", btn_r=7):
+    """Tux and his speech bubble, the bubble on any side of him. The text box and the
+    minimize/close buttons live inside the bubble."""
     tw = th * ART_W / ART_H
-    gap = 14
-    DW, DH = tw + gap + bw + 8, max(bh + 8, th + 4)
-    ay = {"bottom": DH - th, "top": 0}.get(valign, (DH - th) / 2)
-    by = {"bottom": DH - bh - 4, "top": 4}.get(valign, (DH - bh) / 2)
-    if tux_side == "left":
-        ax, bx = 0, tw + gap
-        tip = (ax + 0.80 * tw, ay + 0.22 * th)   # the tail points at his head
+    gap = max(9, th * 0.1)          # room for the tail
+    if side in ("right", "left"):
+        DW, DH = tw + gap + bw + 8, max(bh + 8, th + 4)
+        ay = {"bottom": DH - th, "top": 0}.get(valign, (DH - th) / 2)
+        by = {"bottom": DH - bh - 4, "top": 4}.get(valign, (DH - bh) / 2)
+        if side == "right":
+            ax, bx = 0, tw + gap
+            tip = (ax + 0.80 * tw, ay + 0.22 * th)   # the tail points at his head
+        else:
+            ax, bx = DW - tw, 4
+            tip = (ax + 0.20 * tw, ay + 0.22 * th)
     else:
-        ax, bx = DW - tw, 4
-        tip = (ax + 0.20 * tw, ay + 0.22 * th)
+        DW, DH = max(bw + 8, tw + 8), th + gap + bh + 8
+        ax, bx = (4 if halign == "left" else DW - tw - 4), 4
+        if side == "above":
+            by, ay = 4, DH - th
+            tip = (ax + 0.5 * tw, ay + 0.04 * th)
+        else:
+            ay, by = 0, th + gap + 4
+            tip = (ax + 0.5 * tw, ay + 0.96 * th)
     return Layout(mode, edge, float(DW), float(DH), ART=(ax, ay, th), BUBBLE=(bx, by, bw, bh),
-                  TAIL_TIP=tip, ENTRY=(bx + 10, by + bh - 38, bw - 20, 28),
-                  BTN_MIN=(bx + bw - 38, by + 14, 7), BTN_CLOSE=(bx + bw - 16, by + 14, 7),
-                  GRIP=(ax + tw - 8, ay + th - 8, 9) if grip else None, TEXT_TOP=14)
+                  TAIL_TIP=tip, ENTRY=(bx + 8, by + bh - 34, bw - 16, 26),
+                  BTN_MIN=(bx + bw - 5.4 * btn_r, by + 2 * btn_r, btn_r),
+                  BTN_CLOSE=(bx + bw - 2.3 * btn_r, by + 2 * btn_r, btn_r),
+                  GRIP=(ax + tw - 8, ay + th - 8, 9) if grip else None,
+                  TEXT_TOP=2 * btn_r, FONT=font, SIDE=side)
 
 
-# Free Tux: move and resize anywhere (everything scales with the window)
-FREE = side_layout("free", None, th=150, bw=282, bh=172, grip=True)
-FREE_DEFAULT_SIZE = (380, int(380 * FREE.DH / FREE.DW))
+def free_layout(side="right"):
+    """Free Tux: move and resize anywhere (everything scales with the window)."""
+    bh = 150 if side in ("above", "below") else 172
+    return bubble_layout("free", None, side, th=150, bw=282, bh=bh, grip=True)
 
 
-def mini_layout(edge):
-    """Mini Tux: a tiny penguin on one screen edge, beside a bubble that opens inward."""
+def free_default_size(L):
+    return int(L.DW * 0.88), int(L.DH * 0.88)
+
+
+# Mini Tux: the lowest-profile version, a tiny penguin and a text box that fits its message
+MINI_TH, MINI_BW, MINI_FONT = 44, 232, 10.5
+MINI_BH_MIN, MINI_BH_MAX = 58, 230
+OUTWARD = {"bottom": "below", "top": "above", "left": "left", "right": "right"}
+FLIP = {"right": "left", "left": "right", "above": "below", "below": "above"}
+
+
+def mini_layout(edge, side="right", bh=MINI_BH_MIN):
+    if side == OUTWARD.get(edge):   # never point the box off the screen
+        side = FLIP[side]
     valign = {"bottom": "bottom", "top": "top"}.get(edge, "center")
-    return side_layout("mini", edge, th=84, bw=250, bh=150,
-                       tux_side="right" if edge == "right" else "left", valign=valign)
+    halign = "right" if edge == "right" else "left"
+    return bubble_layout("mini", edge, side, th=MINI_TH, bw=MINI_BW, bh=bh, font=MINI_FONT,
+                         valign=valign, halign=halign, btn_r=6)
+
+
+FREE = free_layout()  # default; the real one follows your settings
 
 
 URL = f"http://127.0.0.1:{PORT}"
@@ -1034,6 +1065,7 @@ class Tux(Gtk.ApplicationWindow):
         self.x11 = X11.open() if USE_X11 else None
         self.L = FREE
         self.mini_drag = None             # Mini Tux being dragged along the edges
+        self.anchored = None              # window size Mini Tux was last put on his edge at
         self.placed_once = False
         self.brain = Brain()
         self.kb = Knowledge()
@@ -1062,6 +1094,7 @@ class Tux(Gtk.ApplicationWindow):
             window, window.background { background: none; box-shadow: none; }
             entry.tux { border-radius: 14px; background: #ffffff; color: #111;
                         border: 2px solid #f2a900; min-height: 0; padding: 2px 8px; }
+            entry.tux.dark { background: #24262b; color: #eeeeee; }
         """
         if hasattr(css, "load_from_string"):   # GTK 4.12+
             css.load_from_string(style)
@@ -1113,12 +1146,21 @@ class Tux(Gtk.ApplicationWindow):
         self.connect("close-request", self.on_close)
         # once he's on screen: stay on top / take his spot (XWayland only)
         self.connect("map", lambda *_: GLib.timeout_add(150, self.place_window))
+        if os.environ.get("TUX_TEST") and self.x11:  # test windows never take your keyboard
+            self.connect("realize", lambda *_: self.no_focus_on_map())
+
+    def no_focus_on_map(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.get_surface().set_user_time(0)
         self.apply_mode()
+        self.apply_theme()
         self.bubble_text = self.greeting()
+        self.fit_mini(force=True)
 
     def greeting(self):
         how = "click me" if self.L.mode == "mini" else "click my belly"
-        return f"{self.kb.tip()}\n\nAsk me anything: {how} or just type. Right-click me for options."
+        return f"{self.kb.tip()}\n\nAsk me anything: {how} or just type. Right-click me for settings."
 
     # ---- geometry
     def geom(self):
@@ -1191,6 +1233,17 @@ class Tux(Gtk.ApplicationWindow):
             cr.restore()
         self.place_entry(s, ox, oy)
         self.update_input_region()
+        # Mini Tux: once the window has really changed size, put him back on his edge
+        if self.L.mode == "mini" and self.x11 and (w, h) != self.anchored and not self.mini_drag:
+            self.anchored = (w, h)
+            GLib.idle_add(self.anchor_mini)
+
+    def anchor_mini(self):
+        if self.L.mode == "mini" and self.x11 and self.get_mapped() and not self.mini_drag:
+            size = (self.get_width(), self.get_height())
+            self.x11.move(self.xid(), *self.edge_pos(self.L.edge, self.settings.get("t", 0.95),
+                                                     size=size))
+        return False
 
     def buttons_on(self):
         return self.bubble_on()  # they live in the bubble's corner
@@ -1247,45 +1300,63 @@ class Tux(Gtk.ApplicationWindow):
         cr.arc(X + R, Y + R, R, math.pi, 1.5 * math.pi)
         cr.close_path()
 
+    THEMES = {
+        "light": {"fill": (1, 1, 1), "edge": (0.1, 0.1, 0.12), "text": (0.08, 0.08, 0.1),
+                  "cmd_bg": (0.13, 0.14, 0.17), "link": "#1a5fb4", "clip": "#8a4b00", "ctx": "#666666"},
+        "dark": {"fill": (0.13, 0.14, 0.16), "edge": (0.55, 0.57, 0.62), "text": (0.93, 0.93, 0.95),
+                 "cmd_bg": (0.05, 0.05, 0.06), "link": "#8ab4f8", "clip": "#f6c177", "ctx": "#a0a0a8"},
+    }
+
+    def theme(self):
+        return self.THEMES.get(self.opt("theme"), self.THEMES["light"])
+
+    def layout_blocks(self, cr, blocks, tw, size, s):
+        """Pango layouts for each block at this font size -> (layouts, total height)."""
+        th_ = self.theme()
+        layouts, total = [], 0
+        for kind, txt in blocks:
+            lay = PangoCairo.create_layout(cr)
+            fam = "Monospace" if kind == "cmd" else "Sans"
+            lay.set_font_description(Pango.FontDescription.from_string(f"{fam} {max(size, 5):.1f}"))
+            lay.set_width(int((tw - (10 * s if kind == "cmd" else 0)) * Pango.SCALE))
+            lay.set_wrap(Pango.WrapMode.WORD_CHAR)
+            if kind == "cmd":
+                lay.set_text(txt, -1)
+            elif kind == "help":
+                lay.set_markup(f"<span foreground='{th_['link']}'><u>{esc(txt)}</u></span>", -1)
+            elif kind == "clip":
+                lay.set_markup(f"<span foreground='{th_['clip']}'>{esc(txt)}</span>", -1)
+            elif kind == "ctx":
+                lay.set_markup(f"<span foreground='{th_['ctx']}'><small>{esc(txt)}</small></span>", -1)
+            elif kind == "action":
+                lay.set_markup(f"<span foreground='{th_['link']}'><b>▸ {esc(txt)}</b></span>", -1)
+            else:
+                lay.set_markup(inline_markup(txt), -1)
+            lh = lay.get_pixel_size()[1] + (8 * s if kind == "cmd" else 0)
+            layouts.append((kind, txt, lay, lh))
+            total += lh + 4 * s
+        return layouts, total
+
     def draw_bubble(self, cr, s, ox, oy):
+        th_ = self.theme()
         bx, by, bw, bh = self.L.BUBBLE
         X, Y, W, H, R = ox + bx * s, oy + by * s, bw * s, bh * s, 16 * s
         self.bubble_path(cr, X, Y, W, H, R, s, ox, oy)
-        cr.set_source_rgba(1, 1, 1, 0.97); cr.fill_preserve()
-        cr.set_source_rgba(0.1, 0.1, 0.12, 0.85); cr.set_line_width(max(1.5, 2 * s)); cr.stroke()
+        alpha = self.opt("opacity")          # see-through setting; the text stays solid
+        cr.set_source_rgba(*th_["fill"], alpha); cr.fill_preserve()
+        cr.set_source_rgba(*th_["edge"], max(0.35, 0.85 * alpha))
+        cr.set_line_width(max(1.5, 2 * s)); cr.stroke()
 
         pad = 12 * s
-        top = self.L.TEXT_TOP * s   # Mini Tux: room for the buttons in the corner
+        top = self.L.TEXT_TOP * s   # room for the buttons in the corner
         Y, H = Y + top, H - top
         tw, th = W - 2 * pad, H - 2 * pad
         if self.entry.get_visible():  # the text box sits inside the bubble, at the bottom
             th -= (self.L.ENTRY[3] + 6) * s
         blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
-        size = 12.5 * s
+        size = self.L.FONT * self.opt("text_size") * s
         while True:  # shrink text until it fits
-            layouts, total = [], 0
-            for kind, txt in blocks:
-                lay = PangoCairo.create_layout(cr)
-                fam = "Monospace" if kind == "cmd" else "Sans"
-                lay.set_font_description(
-                    Pango.FontDescription.from_string(f"{fam} {max(size, 5):.1f}"))
-                lay.set_width(int((tw - (10 * s if kind == "cmd" else 0)) * Pango.SCALE))
-                lay.set_wrap(Pango.WrapMode.WORD_CHAR)
-                if kind == "cmd":
-                    lay.set_text(txt, -1)
-                elif kind == "help":
-                    lay.set_markup(f"<span foreground='#1a5fb4'><u>{esc(txt)}</u></span>", -1)
-                elif kind == "clip":
-                    lay.set_markup(f"<span foreground='#8a4b00'>{esc(txt)}</span>", -1)
-                elif kind == "ctx":
-                    lay.set_markup(f"<span foreground='#666666'><small>{esc(txt)}</small></span>", -1)
-                elif kind == "action":
-                    lay.set_markup(f"<span foreground='#1a5fb4'><b>▸ {esc(txt)}</b></span>", -1)
-                else:
-                    lay.set_markup(inline_markup(txt), -1)
-                lh = lay.get_pixel_size()[1] + (8 * s if kind == "cmd" else 0)
-                layouts.append((kind, txt, lay, lh))
-                total += lh + 4 * s
+            layouts, total = self.layout_blocks(cr, blocks, tw, size, s)
             if total <= th or size <= 6.5 * s:
                 break
             size *= 0.9
@@ -1294,7 +1365,7 @@ class Tux(Gtk.ApplicationWindow):
         cr.rectangle(X + pad / 2, Y + pad / 2, W - pad, H - pad); cr.clip()
         for kind, txt, lay, lh in layouts:
             if kind == "cmd":
-                cr.set_source_rgb(0.13, 0.14, 0.17)
+                cr.set_source_rgb(*th_["cmd_bg"])
                 self.round_rect(cr, X + pad, y, tw, lh, 6 * s); cr.fill()
                 cr.set_source_rgb(0.55, 0.95, 0.55)
                 cr.move_to(X + pad + 5 * s, y + 4 * s)
@@ -1306,7 +1377,7 @@ class Tux(Gtk.ApplicationWindow):
                     self.boxes.append((X + pad, y, tw, lh, "clip", None))
                 elif kind == "action":
                     self.boxes.append((X + pad, y, tw, lh, "action", txt))
-                cr.set_source_rgb(0.08, 0.08, 0.1)
+                cr.set_source_rgb(*th_["text"])
                 cr.move_to(X + pad, y)
             PangoCairo.show_layout(cr, lay)
             y += lh + 4 * s
@@ -1360,11 +1431,16 @@ class Tux(Gtk.ApplicationWindow):
     def tick(self):
         if self.pointer_in or self.entry.get_text():
             self.last_activity = time.monotonic()
-        if time.monotonic() - self.last_activity < HIDE_SECS:
+        secs = self.opt("hide_secs")
+        if not secs:  # "never": keep the bubble up
+            self.tick_src = None
+            return False
+        if time.monotonic() - self.last_activity < secs:
             return True
         self.bubble_hidden = True
         if not self.entry.get_text():
             self.entry.set_visible(False)
+        self.fit_mini()
         self.region_key = None
         self.area.queue_draw()
         self.tick_src = None
@@ -1435,7 +1511,7 @@ class Tux(Gtk.ApplicationWindow):
         edge = min(dist, key=dist.get)
         if edge != self.L.edge:
             self.settings["edge"] = edge
-            self.L = mini_layout(edge)
+            self.L = mini_layout(edge, self.opt("bubble_side"), self.L.BUBBLE[3])
             self.set_default_size(int(self.L.DW), int(self.L.DH))
             self.region_key = None
             self.area.queue_draw()
@@ -1458,9 +1534,9 @@ class Tux(Gtk.ApplicationWindow):
         else:
             self.show_entry()  # just a click on Mini Tux: ask him something
 
-    def edge_pos(self, edge, t, wa=None):
+    def edge_pos(self, edge, t, wa=None, size=None):
         wx, wy, ww, wh = wa or self.x11.workarea()
-        W, H = self.L.DW, self.L.DH
+        W, H = size or (self.L.DW, self.L.DH)
         if edge == "bottom":
             return wx + t * (ww - W), wy + wh - H
         if edge == "top":
@@ -1474,22 +1550,56 @@ class Tux(Gtk.ApplicationWindow):
             warnings.simplefilter("ignore", DeprecationWarning)
             return self.get_surface().get_xid()
 
+    # ---- settings (right-click) values, with defaults
+    DEFAULTS = {"mode": "free", "bubble_side": "right", "opacity": 0.97, "text_size": 1.0,
+                "theme": "light", "hide_secs": HIDE_SECS, "on_top": False}
+
+    def opt(self, key):
+        return self.settings.get(key, self.DEFAULTS[key])
+
     # ---- the two modes
     def apply_mode(self):
-        if self.settings.get("mode") == "mini":
-            self.L = mini_layout(self.settings.get("edge", "bottom"))
+        if self.opt("mode") == "mini":
+            self.L = mini_layout(self.settings.get("edge", "bottom"), self.opt("bubble_side"))
             self.set_default_size(int(self.L.DW), int(self.L.DH))
+            self.fit_mini(force=True)
         else:
-            self.L = FREE
-            w, h = self.settings.get("free_size", FREE_DEFAULT_SIZE)
-            aspect = FREE.DW / FREE.DH
-            if not h or abs(w / h - aspect) > 0.25 * aspect:  # saved from an older layout
-                w, h = FREE_DEFAULT_SIZE
+            self.L = free_layout(self.opt("bubble_side"))
+            w, h = self.settings.get("free_size") or free_default_size(self.L)
+            aspect = self.L.DW / self.L.DH
+            if not h or abs(w / h - aspect) > 0.25 * aspect:  # saved from another layout
+                w, h = free_default_size(self.L)
             self.set_default_size(int(w), int(h))
         self.region_key = None
         self.area.queue_draw()
         if self.get_mapped():
             GLib.timeout_add(150, self.place_window)
+
+    def fit_mini(self, force=False):
+        """Mini Tux's box grows to fit its message and shrinks back when idle."""
+        if self.L.mode != "mini":
+            return
+        if not self.bubble_on():
+            bh = MINI_BH_MIN
+        else:
+            pad = 12 + 12 + self.L.TEXT_TOP + (self.L.ENTRY[3] + 6 if self.entry.get_visible() else 0)
+            bh = int(min(MINI_BH_MAX, max(MINI_BH_MIN, self.text_height(MINI_BW - 24) + pad)))
+        if not force and abs(bh - self.L.BUBBLE[3]) < 4:
+            return
+        self.L = mini_layout(self.L.edge, self.opt("bubble_side"), bh)
+        self.set_default_size(int(self.L.DW), int(self.L.DH))
+        self.region_key = None
+        self.area.queue_draw()
+        if self.x11 and self.get_mapped() and not self.mini_drag:  # stay on the edge
+            self.x11.move(self.xid(), *self.edge_pos(self.L.edge, self.settings.get("t", 0.95)))
+
+    def text_height(self, width):
+        """How tall the current bubble text is at the normal font size (Mini Tux sizing)."""
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
+        cr = cairo.Context(surf)
+        size = self.L.FONT * self.opt("text_size")
+        blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
+        return self.layout_blocks(cr, blocks, width, size, 1.0)[1]
 
     def place_window(self):
         """On top / position. Needs XWayland; without it Tux is a normal window."""
@@ -1512,7 +1622,7 @@ class Tux(Gtk.ApplicationWindow):
         self.apply_mode()
         if mode == "mini":
             self.say("Mini Tux! I stay on top, on every workspace. Drag me along any screen edge; "
-                     "click me to ask. Right-click for options.")
+                     "click me to ask. Right-click for settings.")
         else:
             self.say("Free Tux! Drag me anywhere. Resize with the lines on my foot or Ctrl+scroll.")
 
@@ -1561,6 +1671,7 @@ class Tux(Gtk.ApplicationWindow):
             threading.Thread(target=self.prewarm, args=(self.gen,), daemon=True).start()
             self.check_clipboard()
         self.entry.set_visible(True)
+        self.fit_mini()
         self.region_key = None
         self.area.queue_draw()
         self.entry.grab_focus()
@@ -1618,23 +1729,77 @@ class Tux(Gtk.ApplicationWindow):
         self.touch()
         dx, dy = self.to_design(x, y)
         bx, by, bw, bh = self.L.BUBBLE
-        if self.bubble_on() and bx <= dx <= bx + bw and by <= dy <= by + bh:
+        if self.bubble_on() and bx <= dx <= bx + bw and by <= dy <= by + bh and \
+                not self.bubble_text.startswith("Settings"):
             self.copy_answer()
         else:
-            self.show_options()
+            self.show_settings()
 
-    def show_options(self):
-        opts = []
-        if self.L.mode == "mini":
-            opts.append(("Free Tux: bigger, move & resize anywhere", lambda: self.set_mode("free")))
+    # ---- Settings (right-click): click a line to cycle its value; it applies right away
+    SEE_THROUGH = [(0.97, "solid"), (0.8, "a little"), (0.6, "half"), (0.4, "glass")]
+    TEXT_SIZES = [(0.85, "small"), (1.0, "normal"), (1.2, "large")]
+    HIDE_AFTER = [(10, "10 s"), (20, "20 s"), (60, "1 min"), (0, "never")]
+    SIDE_NAMES = {"right": "right of Tux", "left": "left of Tux", "above": "above Tux",
+                  "below": "below Tux"}
+
+    @staticmethod
+    def _label(options, value):
+        return min(options, key=lambda o: abs(o[0] - value))[1]
+
+    def _cycle(self, key, values):
+        cur = self.opt(key)
+        i = min(range(len(values)), key=lambda j: abs(values[j] - cur) if isinstance(cur, (int, float))
+                else (0 if values[j] == cur else 1))
+        self.settings[key] = values[(i + 1) % len(values)]
+        save_settings(self.settings)
+
+    def show_settings(self, page=1):
+        mini = self.opt("mode") == "mini"
+
+        def change(key, values, relayout=False):
+            def go():
+                self._cycle(key, values)
+                if relayout:
+                    self.remember_free_spot()
+                    self.apply_mode()
+                self.apply_theme()
+                self.show_settings(page)
+            return go
+
+        if page == 1:
+            items = [
+                (f"Mode: {'Mini Tux (tiny, on the screen edge)' if mini else 'Free Tux (move & resize)'}",
+                 lambda: (self.set_mode("free" if mini else "mini"), self.show_settings(1))),
+                (f"Bubble: {self.SIDE_NAMES[self.opt('bubble_side')]}",
+                 change("bubble_side", list(BUBBLE_SIDES), relayout=True)),
+                (f"See-through: {self._label(self.SEE_THROUGH, self.opt('opacity'))}",
+                 change("opacity", [v for v, _ in self.SEE_THROUGH])),
+                (f"Text size: {self._label(self.TEXT_SIZES, self.opt('text_size'))}",
+                 change("text_size", [v for v, _ in self.TEXT_SIZES], relayout=mini)),
+                ("More settings…", lambda: self.show_settings(2)),
+            ]
         else:
-            opts.append(("Mini Tux: tiny, rides the screen edge", lambda: self.set_mode("mini")))
-            opts.append(("Stop staying on top" if self.settings.get("on_top") else
-                         "Keep me on top of other windows", self.toggle_on_top))
-        opts += [("Show me a power tip", lambda: self.say(self.kb.tip())),
-                 ("Tuck my bubble away", self.tuck_bubble)]
-        note = "" if self.x11 else "\n(Staying on top and riding the edges need XWayland.)"
-        self.say_actions("Options:" + note, opts)
+            on_top = "always (Mini Tux)" if mini else ("on" if self.opt("on_top") else "off")
+            items = [
+                (f"Theme: {self.opt('theme')}", change("theme", ["light", "dark"])),
+                (f"Hide bubble after: {self._label(self.HIDE_AFTER, self.opt('hide_secs'))}",
+                 change("hide_secs", [v for v, _ in self.HIDE_AFTER])),
+                (f"Keep on top: {on_top}",
+                 (lambda: self.show_settings(2)) if mini else
+                 (lambda: (self.toggle_on_top(), self.show_settings(2)))),
+                ("Tuck my bubble away", self.tuck_bubble),
+                ("‹ Back", lambda: self.show_settings(1)),
+            ]
+        note = "" if self.x11 else " (on-top & edges need XWayland)"
+        self.say_actions(f"Settings {page}/2{note}", items)
+
+    def apply_theme(self):
+        if self.opt("theme") == "dark":
+            self.entry.add_css_class("dark")
+        else:
+            self.entry.remove_css_class("dark")
+        self.region_key = None
+        self.area.queue_draw()
 
     def show_examples(self, text, command):
         self.help_uri = f"man:{command}"
@@ -1663,6 +1828,7 @@ class Tux(Gtk.ApplicationWindow):
             self.region_key = None
         self.bubble_text = text
         self.touch()
+        self.fit_mini()
         self.area.queue_draw()
         return False
 
