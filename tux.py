@@ -511,35 +511,39 @@ class Layout:
         return side, (xx, c - hw), (xx, c + hw), (tx, ty)
 
 
-# Free Tux: big, move and resize anywhere (everything scales with the window)
-FREE = Layout("free", None, 320.0, 430.0, ART=(58.5, 186.0, 240.0), BUBBLE=(8, 4, 304, 166),
-              TAIL_TIP=(128, 202), ENTRY=(82, 318, 156, 30), BTN_MIN=(220, 198, 9),
-              BTN_CLOSE=(244, 209, 9), GRIP=(252, 419, 10), HOVER=(100, 180, 260, 300))
+ART_W = 411  # width of the Tux picture
+
+
+def side_layout(mode, edge, th, bw, bh, tux_side="left", valign="bottom", grip=False):
+    """Tux sits beside his speech bubble (🐧💬, or 💬🐧 with tux_side='right'). The text box
+    and the minimize/close buttons live inside the bubble."""
+    tw = th * ART_W / ART_H
+    gap = 14
+    DW, DH = tw + gap + bw + 8, max(bh + 8, th + 4)
+    ay = {"bottom": DH - th, "top": 0}.get(valign, (DH - th) / 2)
+    by = {"bottom": DH - bh - 4, "top": 4}.get(valign, (DH - bh) / 2)
+    if tux_side == "left":
+        ax, bx = 0, tw + gap
+        tip = (ax + 0.80 * tw, ay + 0.22 * th)   # the tail points at his head
+    else:
+        ax, bx = DW - tw, 4
+        tip = (ax + 0.20 * tw, ay + 0.22 * th)
+    return Layout(mode, edge, float(DW), float(DH), ART=(ax, ay, th), BUBBLE=(bx, by, bw, bh),
+                  TAIL_TIP=tip, ENTRY=(bx + 10, by + bh - 38, bw - 20, 28),
+                  BTN_MIN=(bx + bw - 38, by + 14, 7), BTN_CLOSE=(bx + bw - 16, by + 14, 7),
+                  GRIP=(ax + tw - 8, ay + th - 8, 9) if grip else None, TEXT_TOP=14)
+
+
+# Free Tux: move and resize anywhere (everything scales with the window)
+FREE = side_layout("free", None, th=150, bw=282, bh=172, grip=True)
+FREE_DEFAULT_SIZE = (380, int(380 * FREE.DH / FREE.DW))
 
 
 def mini_layout(edge):
-    """Mini Tux: a tiny penguin on one screen edge, his bubble opening toward the middle."""
-    th, tw = 84, 71           # tiny Tux
-    bw, bh, gap = 250, 150, 14
-    if edge in ("bottom", "top"):
-        DW, DH = bw + 10, bh + gap + th + 8
-        ax = (DW - tw) / 2
-        if edge == "bottom":
-            ay, bub, tip = DH - th, (5, 4, bw, bh), (ax + 35, DH - th + 4)
-        else:
-            ay, bub, tip = 0, (5, th + gap, bw, bh), (ax + 35, th - 2)
-    else:
-        DW, DH = tw + gap + bw + 8, bh + 8
-        ay = (DH - th) / 2
-        if edge == "left":
-            ax, bub, tip = 0, (tw + gap, 4, bw, bh), (tw - 6, ay + 22)
-        else:
-            ax, bub, tip = DW - tw, (4, 4, bw, bh), (DW - tw + 6, ay + 22)
-    bx, by = bub[0], bub[1]
-    return Layout("mini", edge, float(DW), float(DH), ART=(ax, ay, th), BUBBLE=bub, TAIL_TIP=tip,
-                  ENTRY=(bx + 10, by + bh - 38, bw - 20, 28),
-                  BTN_MIN=(bx + bw - 38, by + 14, 7), BTN_CLOSE=(bx + bw - 16, by + 14, 7),
-                  TEXT_TOP=14)
+    """Mini Tux: a tiny penguin on one screen edge, beside a bubble that opens inward."""
+    valign = {"bottom": "bottom", "top": "top"}.get(edge, "center")
+    return side_layout("mini", edge, th=84, bw=250, bh=150,
+                       tux_side="right" if edge == "right" else "left", valign=valign)
 
 
 URL = f"http://127.0.0.1:{PORT}"
@@ -981,13 +985,11 @@ class Tux(Gtk.ApplicationWindow):
         cr.get_source().set_filter(cairo.FILTER_GOOD)
         cr.paint()
         cr.restore()
-        if self.L.mode == "free":  # on his head; Mini Tux keeps them in the bubble's corner
-            self.draw_buttons(cr)
         cr.restore()
         self.boxes = []
         if self.bubble_on():
             self.draw_bubble(cr, s, ox, oy)
-        if self.L.mode == "mini" and self.buttons_on():
+        if self.L.GRIP or self.buttons_on():  # buttons in the bubble's corner, grip on his foot
             cr.save()
             cr.translate(ox, oy)
             cr.scale(s, s)
@@ -997,7 +999,7 @@ class Tux(Gtk.ApplicationWindow):
         self.update_input_region()
 
     def buttons_on(self):
-        return self.L.mode == "free" or self.bubble_on()
+        return self.bubble_on()  # they live in the bubble's corner
 
     @staticmethod
     def circle(cr, cx, cy, r):
@@ -1006,8 +1008,9 @@ class Tux(Gtk.ApplicationWindow):
 
     def draw_buttons(self, cr):
         a = 1.0 if (self.hover_btns or not self.L.HOVER) else 0.6
-        for (cx, cy, r), col, glyph in ((self.L.BTN_MIN, (0.98, 0.75, 0.15), "min"),
-                                        (self.L.BTN_CLOSE, (0.92, 0.30, 0.25), "close")):
+        buttons = ((self.L.BTN_MIN, (0.98, 0.75, 0.15), "min"),
+                   (self.L.BTN_CLOSE, (0.92, 0.30, 0.25), "close")) if self.buttons_on() else ()
+        for (cx, cy, r), col, glyph in buttons:
             self.circle(cr, cx, cy, r)
             cr.set_source_rgba(*col, a); cr.fill_preserve()
             cr.set_source_rgba(0, 0, 0, 0.5 * a); cr.set_line_width(1); cr.stroke()
@@ -1061,7 +1064,7 @@ class Tux(Gtk.ApplicationWindow):
         top = self.L.TEXT_TOP * s   # Mini Tux: room for the buttons in the corner
         Y, H = Y + top, H - top
         tw, th = W - 2 * pad, H - 2 * pad
-        if self.L.mode == "mini" and self.entry.get_visible():  # entry sits inside the bubble
+        if self.entry.get_visible():  # the text box sits inside the bubble, at the bottom
             th -= (self.L.ENTRY[3] + 6) * s
         blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
         size = 12.5 * s
@@ -1243,7 +1246,7 @@ class Tux(Gtk.ApplicationWindow):
         ax, ay, ah = self.L.ART
         if edge in ("top", "bottom"):  # keep Tux's middle under the pointer
             span = max(1, ww - self.L.DW)
-            t = (px - (ax + ah * 0.42) - wx) / span
+            t = (px - (ax + ah * ART_W / ART_H / 2) - wx) / span
         else:
             span = max(1, wh - self.L.DH)
             t = (py - (ay + ah / 2) - wy) / span
@@ -1282,7 +1285,10 @@ class Tux(Gtk.ApplicationWindow):
             self.set_default_size(int(self.L.DW), int(self.L.DH))
         else:
             self.L = FREE
-            w, h = self.settings.get("free_size", (272, 366))
+            w, h = self.settings.get("free_size", FREE_DEFAULT_SIZE)
+            aspect = FREE.DW / FREE.DH
+            if not h or abs(w / h - aspect) > 0.25 * aspect:  # saved from an older layout
+                w, h = FREE_DEFAULT_SIZE
             self.set_default_size(int(w), int(h))
         self.region_key = None
         self.area.queue_draw()
@@ -1331,7 +1337,7 @@ class Tux(Gtk.ApplicationWindow):
         if self.L.mode == "mini" or not (ctl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK):
             return False
         h = self.get_height()
-        nh = max(120, min(700, int(h * (0.9 if dy > 0 else 1.1))))
+        nh = max(110, min(320, int(h * (0.9 if dy > 0 else 1.1))))  # wide layout: keep it sane
         self.set_default_size(int(nh * self.L.DW / self.L.DH), nh)
         return True
 
