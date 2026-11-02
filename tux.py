@@ -503,11 +503,15 @@ class Tux(Gtk.ApplicationWindow):
         self.region_key = None
 
         css = Gtk.CssProvider()
-        css.load_from_string("""
+        style = """
             window, window.background { background: none; box-shadow: none; }
             entry.tux { border-radius: 14px; background: #ffffff; color: #111;
                         border: 2px solid #f2a900; min-height: 0; padding: 2px 8px; }
-        """)
+        """
+        if hasattr(css, "load_from_string"):   # GTK 4.12+
+            css.load_from_string(style)
+        else:                                   # older GTK (Ubuntu 22.04, Debian 12)
+            css.load_from_data(style, -1)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
