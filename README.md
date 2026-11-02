@@ -42,13 +42,23 @@ sudo apt install python3-pil   # only if you want to use your own Tux picture
 | Drag the lines on his right foot / `Ctrl+scroll` | Resize |
 | Yellow / red button on his head | Minimize / close |
 | Hover over him | Brings his speech bubble back (it tucks away after 20 s idle) |
-| Right-click him | Options: stand on the dock, a power tip, tuck the bubble away |
+| Right-click him | Options: switch Free/Mini Tux, keep on top, a power tip, tuck the bubble away |
 
-**Always visible (optional):** right-click Tux → **Stand on my dock (always on top)…**, or ask
-him to "stay on top". He walks you through it right in his bubble. A tiny GNOME extension
-(*Tux Perch*, in `extension/`) keeps him in the bottom-right corner, standing on your dock,
-above other windows and on every workspace. It takes effect after one log out/in, and the
-same menu undoes it. Nothing is installed unless you choose it.
+### Two ways to have him around
+
+| | **Free Tux** (default) | **Mini Tux** |
+|---|---|---|
+| Size | Resizable | Tiny penguin, mostly speech bubble |
+| Moving | Drag anywhere | Drag him and he slides along the screen edges; his bubble opens toward the middle |
+| Asking | Click his belly or just type | Click him or just type |
+| On top of other windows | Optional: right-click → *Keep me on top* | Always, on every workspace |
+
+Switch any time from the right-click options, or ask him to "stay on top". He remembers your
+choice and where you left him.
+
+Nothing extra to install: GNOME on Wayland doesn't let apps keep themselves on top, so Tux runs
+through XWayland (Ubuntu's built-in support for X11 apps), where that's allowed. To run him as a
+plain Wayland app instead, set `TUX_WAYLAND=1`; he then can't stay on top or ride the edges.
 
 ## How it stays fast and light
 

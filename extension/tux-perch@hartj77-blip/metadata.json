@@ -1,7 +1,0 @@
-{
-  "uuid": "tux-perch@hartj77-blip",
-  "name": "Tux Perch",
-  "description": "Keeps the Tux Linux helper standing on your dock: bottom-right, always on top, on every workspace.",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "url": "https://github.com/hartj77-blip/tux"
-}

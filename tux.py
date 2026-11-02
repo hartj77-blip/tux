@@ -6,8 +6,8 @@ GNOME Help, man pages and your own notes. The model server only runs while
 you're asking things and stops after IDLE_SECS idle (and when Tux closes).
 Run setup_tux.py once to build tux-art.png and index.json.
 """
-import ast
 import ctypes
+import ctypes.util
 import glob
 import json
 import math
@@ -20,12 +20,19 @@ import subprocess
 import threading
 import time
 import urllib.request
+import warnings
 
 import cairo
 import gi
 
 # software rendering: ~half the RAM of GTK's GL renderer and leaves the GPU alone
 os.environ.setdefault("GSK_RENDERER", "cairo")
+# GNOME on Wayland doesn't let apps stay on top or place themselves; X11 apps may. So Tux
+# runs through XWayland (part of Ubuntu, nothing to install). TUX_WAYLAND=1 opts out.
+USE_X11 = bool(os.environ.get("DISPLAY")) and not os.environ.get("TUX_WAYLAND")
+_ORIG_GDK_BACKEND = os.environ.get("GDK_BACKEND")
+if USE_X11:
+    os.environ["GDK_BACKEND"] = "x11"
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
@@ -179,6 +186,9 @@ QUICK = [
     (["driver drivers", "install get update missing nvidia graphics gpu wifi"],
      "Let Ubuntu pick the right drivers (GPU, Wi-Fi):\n```bash\nsudo ubuntu-drivers install\n```\n"
      "Or: Software & Updates → Additional Drivers."),
+    (["rename", "multiple bunch many all several batch lot"],
+     "In Files: select them all, press F2 for bulk rename. Terminal, e.g. .txt → .md:\n"
+     "```bash\nfor f in *.txt; do mv -- \"$f\" \"${f%.txt}.md\"; done\n```"),
     (["appimage"],
      "Make it runnable, then run it:\n```bash\nchmod +x App.AppImage\n./App.AppImage\n```\n"
      "Won't start? It may need FUSE: `sudo apt install libfuse2t64`"),
@@ -196,66 +206,122 @@ def fill_quick(answer, q):
 TIP_WORDS = re.compile(r"\b(tips?|tricks?|hacks?|super ?user|power ?user|pro moves?|"
                        r"something cool|teach me|surprise me)\b", re.I)
 
-# ---------------------------------------------------------------- optional: perch on the dock
-# Wayland apps can't keep themselves on top, so this is a tiny GNOME extension. Nothing is
-# installed unless you pick it from Tux's options; Tux then walks you through it.
-PERCH_UUID = "tux-perch@hartj77-blip"
-PERCH_SRC = os.path.join(HERE, "extension", PERCH_UUID)
-PERCH_DRYRUN = bool(os.environ.get("TUX_PERCH_DRYRUN"))  # tests: change nothing real
-PERCH_WORDS = re.compile(r"\b(on top|always visible|stay visible|pin (yourself|you)|perch|"
-                         r"(sit|stand|stay|live) on (the|my) (dock|taskbar|toolbar|panel))\b", re.I)
+# ---------------------------------------------------------------- window modes: settings + X11
+SETTINGS_FILE = os.environ.get("TUX_SETTINGS") or os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "tux", "settings.json")
+ON_TOP_WORDS = re.compile(r"\b(on top|always visible|stay visible|pin (yourself|you)|mini tux|"
+                          r"(sit|stand|stay|live) on (the|my) (dock|taskbar|toolbar|panel|screen edge))\b",
+                          re.I)
 
 
-def _perch_dir():
-    base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return os.path.join(base, "gnome-shell", "extensions", PERCH_UUID)
-
-
-def _enabled_extensions():
-    out = subprocess.run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
-                         capture_output=True, text=True).stdout.strip()
+def load_settings():
     try:
-        return list(ast.literal_eval(out.removeprefix("@as ") or "[]"))
-    except (ValueError, SyntaxError):
-        return []
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
-def _set_enabled_extensions(exts):
-    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(exts)])
+def save_settings(d):
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        with open(SETTINGS_FILE + ".tmp", "w") as f:
+            json.dump(d, f)
+        os.replace(SETTINGS_FILE + ".tmp", SETTINGS_FILE)
+    except OSError:
+        pass
 
 
-def perch_state():
-    """'unsupported' (not GNOME), 'off', 'pending' (needs a log out/in) or 'on'."""
-    if PERCH_DRYRUN:
-        return os.environ.get("TUX_PERCH_DRYRUN", "off")
-    if "GNOME" not in os.environ.get("XDG_CURRENT_DESKTOP", "").upper() or \
-            not shutil.which("gnome-extensions") or not os.path.isdir(PERCH_SRC):
-        return "unsupported"
-    if not os.path.isdir(_perch_dir()) or PERCH_UUID not in _enabled_extensions():
-        return "off"
-    info = subprocess.run(["gnome-extensions", "info", PERCH_UUID],
-                          capture_output=True, text=True).stdout
-    return "on" if re.search(r"State:\s*(ACTIVE|ENABLED)", info) else "pending"
+def clean_env():
+    """Environment for apps Tux opens (Help): don't push them onto X11 too."""
+    env = dict(os.environ)
+    if _ORIG_GDK_BACKEND is None:
+        env.pop("GDK_BACKEND", None)
+    else:
+        env["GDK_BACKEND"] = _ORIG_GDK_BACKEND
+    return env
 
 
-def perch_install():
-    if PERCH_DRYRUN:
-        return
-    shutil.copytree(PERCH_SRC, _perch_dir(), dirs_exist_ok=True)
-    subprocess.run(["gnome-extensions", "enable", PERCH_UUID], capture_output=True)
-    exts = _enabled_extensions()  # GNOME only discovers new extensions at login
-    if PERCH_UUID not in exts:
-        _set_enabled_extensions(exts + [PERCH_UUID])
+class _ClientMessage(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p), ("window", ctypes.c_ulong),
+                ("message_type", ctypes.c_ulong), ("format", ctypes.c_int),
+                ("data", ctypes.c_long * 5), ("pad", ctypes.c_long * 12)]
 
 
-def perch_remove():
-    if PERCH_DRYRUN:
-        return
-    subprocess.run(["gnome-extensions", "disable", PERCH_UUID], capture_output=True)
-    exts = _enabled_extensions()
-    if PERCH_UUID in exts:
-        _set_enabled_extensions([e for e in exts if e != PERCH_UUID])
-    shutil.rmtree(_perch_dir(), ignore_errors=True)
+class X11:
+    """Tiny Xlib bridge: stay on top, move, find the pointer and the screen's usable area."""
+
+    @classmethod
+    def open(cls):
+        try:
+            return cls()
+        except (OSError, RuntimeError, AttributeError):
+            return None
+
+    def __init__(self):
+        lib = ctypes.util.find_library("X11")
+        if not lib:
+            raise RuntimeError("no libX11")
+        X = self.X = ctypes.CDLL(lib)
+        vp, ul, ci, cl = ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long
+        P = ctypes.POINTER
+        X.XOpenDisplay.restype, X.XOpenDisplay.argtypes = vp, [ctypes.c_char_p]
+        X.XDefaultRootWindow.restype, X.XDefaultRootWindow.argtypes = ul, [vp]
+        X.XInternAtom.restype, X.XInternAtom.argtypes = ul, [vp, ctypes.c_char_p, ci]
+        X.XMoveWindow.argtypes = [vp, ul, ci, ci]
+        X.XFlush.argtypes = [vp]
+        X.XFree.argtypes = [vp]
+        X.XSendEvent.argtypes = [vp, ul, ci, cl, vp]
+        X.XGetWindowProperty.argtypes = [vp, ul, ul, cl, cl, ci, ul, P(ul), P(ci), P(ul), P(ul), P(vp)]
+        X.XTranslateCoordinates.argtypes = [vp, ul, ul, ci, ci, P(ci), P(ci), P(ul)]
+        X.XQueryPointer.argtypes = [vp, ul, P(ul), P(ul), P(ci), P(ci), P(ci), P(ci), P(ctypes.c_uint)]
+        X.XDisplayWidth.argtypes = X.XDisplayHeight.argtypes = [vp, ci]
+        self.dpy = X.XOpenDisplay(None)
+        if not self.dpy:
+            raise RuntimeError("no X display")
+        self.root = X.XDefaultRootWindow(self.dpy)
+        atom = lambda n: X.XInternAtom(self.dpy, n.encode(), 0)  # noqa: E731
+        self.STATE, self.ABOVE = atom("_NET_WM_STATE"), atom("_NET_WM_STATE_ABOVE")
+        self.STICKY, self.WORKAREA = atom("_NET_WM_STATE_STICKY"), atom("_NET_WORKAREA")
+
+    def set_on_top(self, xid, on):
+        """Above other windows + on every workspace (or neither)."""
+        ev = _ClientMessage(type=33, send_event=1, display=self.dpy, window=xid,
+                            message_type=self.STATE, format=32)
+        ev.data[0], ev.data[1], ev.data[2], ev.data[3] = (1 if on else 0), self.ABOVE, self.STICKY, 1
+        self.X.XSendEvent(self.dpy, self.root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
+        self.X.XFlush(self.dpy)
+
+    def move(self, xid, x, y):
+        self.X.XMoveWindow(self.dpy, xid, int(x), int(y))
+        self.X.XFlush(self.dpy)
+
+    def pos(self, xid):
+        x, y, child = ctypes.c_int(), ctypes.c_int(), ctypes.c_ulong()
+        self.X.XTranslateCoordinates(self.dpy, xid, self.root, 0, 0, ctypes.byref(x),
+                                     ctypes.byref(y), ctypes.byref(child))
+        return x.value, y.value
+
+    def pointer(self):
+        r, c = ctypes.c_ulong(), ctypes.c_ulong()
+        rx, ry, wx, wy, m = ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_uint()
+        self.X.XQueryPointer(self.dpy, self.root, ctypes.byref(r), ctypes.byref(c), ctypes.byref(rx),
+                             ctypes.byref(ry), ctypes.byref(wx), ctypes.byref(wy), ctypes.byref(m))
+        return rx.value, ry.value
+
+    def workarea(self):
+        """(x, y, w, h) of the screen minus the top bar and dock."""
+        t, f, n, after, prop = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p()
+        self.X.XGetWindowProperty(self.dpy, self.root, self.WORKAREA, 0, 4, 0, 6, ctypes.byref(t),
+                                  ctypes.byref(f), ctypes.byref(n), ctypes.byref(after), ctypes.byref(prop))
+        if prop.value and n.value >= 4:
+            arr = ctypes.cast(prop, ctypes.POINTER(ctypes.c_long))
+            wa = tuple(int(arr[i]) for i in range(4))
+            self.X.XFree(prop)
+            if wa[2] > 0 and wa[3] > 0:
+                return wa
+        return 0, 0, self.X.XDisplayWidth(self.dpy, 0), self.X.XDisplayHeight(self.dpy, 0)
 
 
 # ---------------------------------------------------------------- install helper
@@ -409,16 +475,72 @@ def install_answer(verb, name):
                 f"```bash\nsudo apt install {sugg[0][0]}\n```")
     return None
 
-# design space: everything is laid out in a 320 x 430 box and scaled
-DW, DH = 320.0, 430.0
-ART = (58.5, 186.0, 240.0)         # x, y, height of the Tux picture
-BUBBLE = (8, 4, 304, 166)          # x, y, w, h
-TAIL_TIP = (128, 202)
-BELLY = (160, 334, 49, 64)         # cx, cy, rx, ry -> click to type
-BELLY_ENTRY = (82, 318, 156, 30)   # where the text entry pops up
-BTN_MIN = (220, 198, 9)            # cx, cy, r
-BTN_CLOSE = (244, 209, 9)
-GRIP = (252, 419, 10)
+# ---------------------------------------------------------------- layouts
+ART_H = 486  # height of the Tux picture in pixels; belly etc. are measured on it
+
+
+class Layout:
+    """Where everything goes, in design units. Free Tux scales them to the window size;
+    Mini Tux is drawn 1:1 in a window of exactly DW x DH."""
+
+    def __init__(self, mode, edge, DW, DH, ART, BUBBLE, TAIL_TIP, ENTRY, BTN_MIN, BTN_CLOSE,
+                 GRIP=None, HOVER=None, TEXT_TOP=0):
+        self.mode, self.edge, self.DW, self.DH = mode, edge, DW, DH
+        self.ART, self.BUBBLE, self.TAIL_TIP, self.ENTRY = ART, BUBBLE, TAIL_TIP, ENTRY
+        self.BTN_MIN, self.BTN_CLOSE, self.GRIP = BTN_MIN, BTN_CLOSE, GRIP
+        self.HOVER, self.TEXT_TOP = HOVER, TEXT_TOP
+
+    @property
+    def BELLY(self):  # cx, cy, rx, ry: click here to type
+        ax, ay, ah = self.ART
+        k = ah / ART_H
+        return ax + 205.5 * k, ay + 299.7 * k, 99 * k, 130 * k
+
+    def tail(self):
+        """Speech-bubble tail: which side it leaves from, two base points and the tip."""
+        bx, by, bw, bh = self.BUBBLE
+        tx, ty = self.TAIL_TIP
+        hw, r = 11, 16
+        side = ("bottom" if ty > by + bh else "top" if ty < by else "left" if tx < bx else "right")
+        if side in ("top", "bottom"):
+            c = min(max(tx, bx + r + hw), bx + bw - r - hw)
+            yy = by + bh if side == "bottom" else by
+            return side, (c - hw, yy), (c + hw, yy), (tx, ty)
+        c = min(max(ty, by + r + hw), by + bh - r - hw)
+        xx = bx if side == "left" else bx + bw
+        return side, (xx, c - hw), (xx, c + hw), (tx, ty)
+
+
+# Free Tux: big, move and resize anywhere (everything scales with the window)
+FREE = Layout("free", None, 320.0, 430.0, ART=(58.5, 186.0, 240.0), BUBBLE=(8, 4, 304, 166),
+              TAIL_TIP=(128, 202), ENTRY=(82, 318, 156, 30), BTN_MIN=(220, 198, 9),
+              BTN_CLOSE=(244, 209, 9), GRIP=(252, 419, 10), HOVER=(100, 180, 260, 300))
+
+
+def mini_layout(edge):
+    """Mini Tux: a tiny penguin on one screen edge, his bubble opening toward the middle."""
+    th, tw = 84, 71           # tiny Tux
+    bw, bh, gap = 250, 150, 14
+    if edge in ("bottom", "top"):
+        DW, DH = bw + 10, bh + gap + th + 8
+        ax = (DW - tw) / 2
+        if edge == "bottom":
+            ay, bub, tip = DH - th, (5, 4, bw, bh), (ax + 35, DH - th + 4)
+        else:
+            ay, bub, tip = 0, (5, th + gap, bw, bh), (ax + 35, th - 2)
+    else:
+        DW, DH = tw + gap + bw + 8, bh + 8
+        ay = (DH - th) / 2
+        if edge == "left":
+            ax, bub, tip = 0, (tw + gap, 4, bw, bh), (tw - 6, ay + 22)
+        else:
+            ax, bub, tip = DW - tw, (4, 4, bw, bh), (DW - tw + 6, ay + 22)
+    bx, by = bub[0], bub[1]
+    return Layout("mini", edge, float(DW), float(DH), ART=(ax, ay, th), BUBBLE=bub, TAIL_TIP=tip,
+                  ENTRY=(bx + 10, by + bh - 38, bw - 20, 28),
+                  BTN_MIN=(bx + bw - 38, by + 14, 7), BTN_CLOSE=(bx + bw - 16, by + 14, 7),
+                  TEXT_TOP=14)
+
 
 URL = f"http://127.0.0.1:{PORT}"
 
@@ -710,13 +832,17 @@ class Tux(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Tux")
         self.set_decorated(False)
-        self.set_default_size(272, 366)
+        self.settings = load_settings()   # mode, edge, on_top, last free size/position
+        self.x11 = X11.open() if USE_X11 else None
+        self.L = FREE
+        self.mini_drag = None             # Mini Tux being dragged along the edges
+        self.placed_once = False
         self.brain = Brain()
         self.kb = Knowledge()
         self.art = cairo.ImageSurface.create_from_png(ART_PNG)
         self.art_runs = json.load(open(ART_JSON))["runs"]
         self.history = []
-        self.bubble_text = self.kb.tip() + "\n\nAsk me anything: click my belly or just type. Right-click me for options."
+        self.bubble_text = ""          # greeting is set once the mode is known
         self.help_uri = None
         self.clip = None             # clipboard text attached to the next question
         self.clip_seen = None        # last clipboard text we looked at
@@ -766,6 +892,10 @@ class Tux(Gtk.ApplicationWindow):
         rclick = Gtk.GestureClick(button=3)  # right-click the bubble: copy the whole answer
         rclick.connect("pressed", self.on_rclick)  # bubble: copy answer; Tux: options
         self.area.add_controller(rclick)
+        drag = Gtk.GestureDrag(button=1)    # Mini Tux: slide along the screen edges
+        drag.connect("drag-update", self.on_drag_update)
+        drag.connect("drag-end", self.on_drag_end)
+        self.area.add_controller(drag)
         # coming back to Tux (e.g. after copying an error): look at the clipboard
         self.connect("notify::is-active", lambda *_: self.is_active() and self.check_clipboard())
 
@@ -783,12 +913,20 @@ class Tux(Gtk.ApplicationWindow):
         self.add_controller(keys)
 
         self.connect("close-request", self.on_close)
+        # once he's on screen: stay on top / take his spot (XWayland only)
+        self.connect("map", lambda *_: GLib.timeout_add(150, self.place_window))
+        self.apply_mode()
+        self.bubble_text = self.greeting()
+
+    def greeting(self):
+        how = "click me" if self.L.mode == "mini" else "click my belly"
+        return f"{self.kb.tip()}\n\nAsk me anything: {how} or just type. Right-click me for options."
 
     # ---- geometry
     def geom(self):
         w, h = self.area.get_width(), self.area.get_height()
-        s = min(w / DW, h / DH) if w and h else 1.0
-        return s, (w - DW * s) / 2, (h - DH * s) / 2
+        s = min(w / self.L.DW, h / self.L.DH) if w and h else 1.0
+        return s, (w - self.L.DW * s) / 2, (h - self.L.DH * s) / 2
 
     def to_design(self, x, y):
         s, ox, oy = self.geom()
@@ -800,25 +938,30 @@ class Tux(Gtk.ApplicationWindow):
         if not surf:
             return
         s, ox, oy = self.geom()
-        key = (round(s, 3), round(ox), round(oy), self.bubble_on(), self.entry.get_visible())
+        key = (self.L.mode, self.L.edge, round(s, 3), round(ox), round(oy), self.bubble_on(),
+               self.entry.get_visible())
         if key == self.region_key:
             return
         self.region_key = key
         R = cairo.RectangleInt
         region = cairo.Region()
-        ax, ay, ah = ART
+        ax, ay, ah = self.L.ART
         k = ah / self.art.get_height() * s
         for y, x0, x1 in self.art_runs:
             region.union(R(int(ox + ax * s + x0 * k), int(oy + ay * s + y * k),
                            int((x1 - x0) * k) + 1, int(2 * k) + 1))
-        for cx, cy, r in (BTN_MIN, BTN_CLOSE, GRIP):
+        circles = [c for c in (self.L.GRIP,) if c]
+        if self.buttons_on():
+            circles += [self.L.BTN_MIN, self.L.BTN_CLOSE]
+        for cx, cy, r in circles:
             r += 3
             region.union(R(int(ox + (cx - r) * s), int(oy + (cy - r) * s),
                            int(2 * r * s) + 1, int(2 * r * s) + 1))
-        rects = [BELLY_ENTRY] if self.entry.get_visible() else []
+        rects = [self.L.ENTRY] if self.entry.get_visible() else []
         if self.bubble_on():
-            bx, by, bw, bh = BUBBLE
-            rects += [BUBBLE, (TAIL_TIP[0] - 22, by + bh, 36, TAIL_TIP[1] - by - bh)]
+            _side, b1, b2, tip = self.L.tail()
+            xs, ys = (b1[0], b2[0], tip[0]), (b1[1], b2[1], tip[1])
+            rects += [self.L.BUBBLE, (min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)]
         for x, y, w, h in rects:
             region.union(R(int(ox + x * s), int(oy + y * s), int(w * s) + 1, int(h * s) + 1))
         surf.set_input_region(region)
@@ -829,7 +972,7 @@ class Tux(Gtk.ApplicationWindow):
         cr.save()
         cr.translate(ox, oy)
         cr.scale(s, s)
-        ax, ay, ah = ART
+        ax, ay, ah = self.L.ART
         k = ah / self.art.get_height()
         cr.save()
         cr.translate(ax, ay)
@@ -838,13 +981,23 @@ class Tux(Gtk.ApplicationWindow):
         cr.get_source().set_filter(cairo.FILTER_GOOD)
         cr.paint()
         cr.restore()
-        self.draw_buttons(cr)
+        if self.L.mode == "free":  # on his head; Mini Tux keeps them in the bubble's corner
+            self.draw_buttons(cr)
         cr.restore()
         self.boxes = []
         if self.bubble_on():
             self.draw_bubble(cr, s, ox, oy)
+        if self.L.mode == "mini" and self.buttons_on():
+            cr.save()
+            cr.translate(ox, oy)
+            cr.scale(s, s)
+            self.draw_buttons(cr)
+            cr.restore()
         self.place_entry(s, ox, oy)
         self.update_input_region()
+
+    def buttons_on(self):
+        return self.L.mode == "free" or self.bubble_on()
 
     @staticmethod
     def circle(cr, cx, cy, r):
@@ -852,9 +1005,9 @@ class Tux(Gtk.ApplicationWindow):
         cr.arc(cx, cy, r, 0, 2 * math.pi)
 
     def draw_buttons(self, cr):
-        a = 1.0 if self.hover_btns else 0.6
-        for (cx, cy, r), col, glyph in ((BTN_MIN, (0.98, 0.75, 0.15), "min"),
-                                        (BTN_CLOSE, (0.92, 0.30, 0.25), "close")):
+        a = 1.0 if (self.hover_btns or not self.L.HOVER) else 0.6
+        for (cx, cy, r), col, glyph in ((self.L.BTN_MIN, (0.98, 0.75, 0.15), "min"),
+                                        (self.L.BTN_CLOSE, (0.92, 0.30, 0.25), "close")):
             self.circle(cr, cx, cy, r)
             cr.set_source_rgba(*col, a); cr.fill_preserve()
             cr.set_source_rgba(0, 0, 0, 0.5 * a); cr.set_line_width(1); cr.stroke()
@@ -866,30 +1019,50 @@ class Tux(Gtk.ApplicationWindow):
                 cr.move_to(cx - k, cy - k); cr.line_to(cx + k, cy + k)
                 cr.move_to(cx + k, cy - k); cr.line_to(cx - k, cy + k)
             cr.stroke()
-        gx, gy, _ = GRIP  # resize grip: three little lines on the right foot
-        cr.set_source_rgba(0.35, 0.2, 0, 0.7); cr.set_line_width(1.6)
-        for d in (4, 8, 12):
-            cr.move_to(gx + 6 - d, gy + 6); cr.line_to(gx + 6, gy + 6 - d)
-        cr.stroke()
+        if self.L.GRIP:  # resize grip: three little lines on the right foot (Free Tux only)
+            gx, gy, _ = self.L.GRIP
+            cr.set_source_rgba(0.35, 0.2, 0, 0.7); cr.set_line_width(1.6)
+            for d in (4, 8, 12):
+                cr.move_to(gx + 6 - d, gy + 6); cr.line_to(gx + 6, gy + 6 - d)
+            cr.stroke()
 
-    def draw_bubble(self, cr, s, ox, oy):
-        bx, by, bw, bh = BUBBLE
-        X, Y, W, H, R = ox + bx * s, oy + by * s, bw * s, bh * s, 16 * s
-        tx, ty = TAIL_TIP
+    def bubble_path(self, cr, X, Y, W, H, R, s, ox, oy):
+        """Rounded box with the tail on whichever side faces Tux."""
+        side, b1, b2, tip = self.L.tail()
+        b1, b2, tip = [(ox + p[0] * s, oy + p[1] * s) for p in (b1, b2, tip)]
         cr.new_path()
+        cr.move_to(X + R, Y)
+        if side == "top":
+            cr.line_to(*b1); cr.line_to(*tip); cr.line_to(*b2)
+        cr.line_to(X + W - R, Y)
         cr.arc(X + W - R, Y + R, R, -math.pi / 2, 0)
+        if side == "right":
+            cr.line_to(*b1); cr.line_to(*tip); cr.line_to(*b2)
+        cr.line_to(X + W, Y + H - R)
         cr.arc(X + W - R, Y + H - R, R, 0, math.pi / 2)
-        cr.line_to(ox + (tx + 10) * s, Y + H)
-        cr.line_to(ox + tx * s, oy + ty * s)
-        cr.line_to(ox + (tx - 18) * s, Y + H)
+        if side == "bottom":
+            cr.line_to(*b2); cr.line_to(*tip); cr.line_to(*b1)
+        cr.line_to(X + R, Y + H)
         cr.arc(X + R, Y + H - R, R, math.pi / 2, math.pi)
+        if side == "left":
+            cr.line_to(*b2); cr.line_to(*tip); cr.line_to(*b1)
+        cr.line_to(X, Y + R)
         cr.arc(X + R, Y + R, R, math.pi, 1.5 * math.pi)
         cr.close_path()
+
+    def draw_bubble(self, cr, s, ox, oy):
+        bx, by, bw, bh = self.L.BUBBLE
+        X, Y, W, H, R = ox + bx * s, oy + by * s, bw * s, bh * s, 16 * s
+        self.bubble_path(cr, X, Y, W, H, R, s, ox, oy)
         cr.set_source_rgba(1, 1, 1, 0.97); cr.fill_preserve()
         cr.set_source_rgba(0.1, 0.1, 0.12, 0.85); cr.set_line_width(max(1.5, 2 * s)); cr.stroke()
 
         pad = 12 * s
+        top = self.L.TEXT_TOP * s   # Mini Tux: room for the buttons in the corner
+        Y, H = Y + top, H - top
         tw, th = W - 2 * pad, H - 2 * pad
+        if self.L.mode == "mini" and self.entry.get_visible():  # entry sits inside the bubble
+            th -= (self.L.ENTRY[3] + 6) * s
         blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
         size = 12.5 * s
         while True:  # shrink text until it fits
@@ -952,7 +1125,7 @@ class Tux(Gtk.ApplicationWindow):
         cr.close_path()
 
     def place_entry(self, s, ox, oy):
-        x, y, w, h = BELLY_ENTRY
+        x, y, w, h = self.L.ENTRY
         self.entry.set_margin_start(int(ox + x * s))
         self.entry.set_margin_top(int(oy + y * s))
         self.entry.set_size_request(int(w * s), int(h * s))
@@ -964,7 +1137,8 @@ class Tux(Gtk.ApplicationWindow):
 
     def on_motion(self, _ctl, x, y):
         dx, dy = self.to_design(x, y)
-        self.set_hover(100 < dx < 260 and 180 < dy < 300)
+        hv = self.L.HOVER
+        self.set_hover(bool(hv) and hv[0] < dx < hv[2] and hv[1] < dy < hv[3])
         self.pointer_in = True
         self.touch()
 
@@ -1009,11 +1183,11 @@ class Tux(Gtk.ApplicationWindow):
         dx, dy = self.to_design(x, y)
         dev, btn, t = gesture.get_device(), gesture.get_current_button(), gesture.get_current_event_time()
         surf = self.get_surface()
-        if self.inside_circle(dx, dy, BTN_CLOSE):
+        if self.buttons_on() and self.inside_circle(dx, dy, self.L.BTN_CLOSE):
             self.close(); return
-        if self.inside_circle(dx, dy, BTN_MIN):
+        if self.buttons_on() and self.inside_circle(dx, dy, self.L.BTN_MIN):
             self.minimize(); return
-        if self.inside_circle(dx, dy, GRIP, 4):
+        if self.L.GRIP and self.inside_circle(dx, dy, self.L.GRIP, 4):
             surf.begin_resize(Gdk.SurfaceEdge.SOUTH_EAST, dev, btn, x, y, t); return
         for bx, by, bw, bh, kind, payload in self.boxes:
             if bx <= x <= bx + bw and by <= y <= by + bh:
@@ -1026,25 +1200,139 @@ class Tux(Gtk.ApplicationWindow):
                     if fn:
                         fn()
                 elif payload:
-                    subprocess.Popen(["yelp", payload], start_new_session=True,
+                    subprocess.Popen(["yelp", payload], start_new_session=True, env=clean_env(),
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
-        b = BUBBLE
+        b = self.L.BUBBLE
         if self.bubble_on() and b[0] <= dx <= b[0] + b[2] and b[1] <= dy <= b[1] + b[3]:
             if not self.history:  # still on the tip screen: show another tip
-                self.say(self.kb.tip() + "\n\nAsk me anything: click my belly or just type. Right-click me for options.")
+                self.say(self.greeting())
             return
-        cx, cy, rx, ry = BELLY
+        if self.L.mode == "mini":
+            if self.x11:  # Mini Tux: click = ask, drag = slide along the screen edges
+                self.mini_drag = {"start": self.x11.pointer(), "moved": False}
+            else:         # no XWayland: can't place ourselves, let GNOME move him
+                surf.begin_move(dev, btn, x, y, t)
+            return
+        cx, cy, rx, ry = self.L.BELLY
         if math.hypot((dx - cx) / rx, (dy - cy) / ry) <= 1 and n_press == 1:
             self.show_entry(); return
         surf.begin_move(dev, btn, x, y, t)
 
+    # ---- Mini Tux rides the screen edges
+    def on_drag_update(self, *_):
+        d = self.mini_drag
+        if not d or not self.x11:
+            return
+        px, py = self.x11.pointer()
+        if not d["moved"]:
+            if abs(px - d["start"][0]) + abs(py - d["start"][1]) < 6:
+                return
+            d["moved"] = True
+            d["wa"] = self.x11.workarea()
+        wx, wy, ww, wh = d["wa"]
+        # the edge nearest the pointer, and how far along it
+        dist = {"left": px - wx, "right": wx + ww - px, "top": py - wy, "bottom": wy + wh - py}
+        edge = min(dist, key=dist.get)
+        if edge != self.L.edge:
+            self.settings["edge"] = edge
+            self.L = mini_layout(edge)
+            self.set_default_size(int(self.L.DW), int(self.L.DH))
+            self.region_key = None
+            self.area.queue_draw()
+        ax, ay, ah = self.L.ART
+        if edge in ("top", "bottom"):  # keep Tux's middle under the pointer
+            span = max(1, ww - self.L.DW)
+            t = (px - (ax + ah * 0.42) - wx) / span
+        else:
+            span = max(1, wh - self.L.DH)
+            t = (py - (ay + ah / 2) - wy) / span
+        self.settings["t"] = min(1.0, max(0.0, t))
+        self.x11.move(self.xid(), *self.edge_pos(edge, self.settings["t"], d["wa"]))
+
+    def on_drag_end(self, *_):
+        d, self.mini_drag = self.mini_drag, None
+        if not d:
+            return
+        if d["moved"]:
+            save_settings(self.settings)
+        else:
+            self.show_entry()  # just a click on Mini Tux: ask him something
+
+    def edge_pos(self, edge, t, wa=None):
+        wx, wy, ww, wh = wa or self.x11.workarea()
+        W, H = self.L.DW, self.L.DH
+        if edge == "bottom":
+            return wx + t * (ww - W), wy + wh - H
+        if edge == "top":
+            return wx + t * (ww - W), wy
+        if edge == "left":
+            return wx, wy + t * (wh - H)
+        return wx + ww - W, wy + t * (wh - H)
+
+    def xid(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return self.get_surface().get_xid()
+
+    # ---- the two modes
+    def apply_mode(self):
+        if self.settings.get("mode") == "mini":
+            self.L = mini_layout(self.settings.get("edge", "bottom"))
+            self.set_default_size(int(self.L.DW), int(self.L.DH))
+        else:
+            self.L = FREE
+            w, h = self.settings.get("free_size", (272, 366))
+            self.set_default_size(int(w), int(h))
+        self.region_key = None
+        self.area.queue_draw()
+        if self.get_mapped():
+            GLib.timeout_add(150, self.place_window)
+
+    def place_window(self):
+        """On top / position. Needs XWayland; without it Tux is a normal window."""
+        if not self.x11 or not self.get_mapped():
+            return False
+        xid = self.xid()
+        mini = self.L.mode == "mini"
+        self.x11.set_on_top(xid, mini or self.settings.get("on_top", False))
+        if mini:
+            self.x11.move(xid, *self.edge_pos(self.L.edge, self.settings.get("t", 0.95)))
+        elif not self.placed_once and self.settings.get("free_pos"):
+            self.x11.move(xid, *self.settings["free_pos"])
+        self.placed_once = True
+        return False
+
+    def set_mode(self, mode):
+        self.remember_free_spot()
+        self.settings["mode"] = mode
+        save_settings(self.settings)
+        self.apply_mode()
+        if mode == "mini":
+            self.say("Mini Tux! I stay on top, on every workspace. Drag me along any screen edge; "
+                     "click me to ask. Right-click for options.")
+        else:
+            self.say("Free Tux! Drag me anywhere. Resize with the lines on my foot or Ctrl+scroll.")
+
+    def toggle_on_top(self, on=None):
+        self.settings["on_top"] = (not self.settings.get("on_top")) if on is None else on
+        save_settings(self.settings)
+        self.place_window()
+        self.say("I'll stay on top of your windows, on every workspace." if self.settings["on_top"]
+                 else "Okay, I'm a normal window again.")
+
+    def remember_free_spot(self):
+        if self.L.mode == "free" and self.get_mapped():
+            self.settings["free_size"] = [self.get_width(), self.get_height()]
+            if self.x11:
+                self.settings["free_pos"] = list(self.x11.pos(self.xid()))
+
     def on_scroll(self, ctl, _dx, dy):
-        if not (ctl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK):
+        if self.L.mode == "mini" or not (ctl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK):
             return False
         h = self.get_height()
         nh = max(120, min(700, int(h * (0.9 if dy > 0 else 1.1))))
-        self.set_default_size(int(nh * DW / DH), nh)
+        self.set_default_size(int(nh * self.L.DW / self.L.DH), nh)
         return True
 
     def on_key(self, _ctl, keyval, _code, state):
@@ -1127,78 +1415,42 @@ class Tux(Gtk.ApplicationWindow):
     def on_rclick(self, _gesture, _n, x, y):
         self.touch()
         dx, dy = self.to_design(x, y)
-        bx, by, bw, bh = BUBBLE
+        bx, by, bw, bh = self.L.BUBBLE
         if self.bubble_on() and bx <= dx <= bx + bw and by <= dy <= by + bh:
             self.copy_answer()
         else:
             self.show_options()
 
     def show_options(self):
-        dock = {"off": "Stand on my dock (always on top)…",
-                "pending": "Finish the dock setup…",
-                "on": "Stop standing on the dock"}.get(perch_state(), "Stay on top of windows…")
-        self.say_actions("Options:", [
-            (dock, self.perch_offer),
-            ("Show me a power tip", lambda: self.say(self.kb.tip())),
-            ("Tuck my bubble away", self.tuck_bubble),
-        ])
+        opts = []
+        if self.L.mode == "mini":
+            opts.append(("Free Tux: bigger, move & resize anywhere", lambda: self.set_mode("free")))
+        else:
+            opts.append(("Mini Tux: tiny, rides the screen edge", lambda: self.set_mode("mini")))
+            opts.append(("Stop staying on top" if self.settings.get("on_top") else
+                         "Keep me on top of other windows", self.toggle_on_top))
+        opts += [("Show me a power tip", lambda: self.say(self.kb.tip())),
+                 ("Tuck my bubble away", self.tuck_bubble)]
+        note = "" if self.x11 else "\n(Staying on top and riding the edges need XWayland.)"
+        self.say_actions("Options:" + note, opts)
 
     def tuck_bubble(self):
         self.last_activity = 0
         self.pointer_in = False
 
-    def perch_offer(self):
-        state = perch_state()
-        if state == "unsupported":
-            self.say("Staying on top needs the GNOME desktop. On other desktops, use the window "
+    def on_top_offer(self):
+        """'stay on top' / 'sit on my dock': offer the two ways to stay visible."""
+        if not self.x11:
+            self.say("Staying on top needs XWayland, which isn't running here. Try your window "
                      "menu (often Alt+Space) → Always on Top.")
-        elif state == "off":
-            self.say_actions(
-                "Want me to stay on top of your windows, standing on your dock?\n"
-                "I need a tiny GNOME extension for that. You can undo it anytime.",
-                [("Set it up", self.perch_setup), ("Not now", self.perch_not_now)])
-        elif state == "pending":
-            self.say_actions(
-                "I'm set up and waiting for your next login.",
-                [("Log out now", self.perch_logout), ("Later", self.perch_later),
-                 ("Undo setup", self.perch_undo)])
-        else:
-            self.say_actions(
-                "I'm standing on your dock, on top of everything.",
-                [("Stop standing on the dock", self.perch_undo), ("Keep me here", lambda: self.say("👍"))])
-
-    def perch_setup(self):
-        try:
-            perch_install()
-        except Exception as e:
-            self.say(f"Setup didn't work: {e}")
             return
-        self.say_actions(
-            "Done! GNOME only loads extensions at login, so log out and back in once "
-            "and I'll hop onto your dock.\nSave your work first.",
-            [("Log out now", self.perch_logout), ("Later", self.perch_later)])
-
-    def perch_logout(self):
-        if not PERCH_DRYRUN:  # GNOME shows its own "Log out?" confirmation
-            subprocess.Popen(["gnome-session-quit", "--logout"], start_new_session=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.say("See you on the dock! 🐧")
-
-    def perch_later(self):
-        self.say("Okay! I'll hop onto your dock next time you log in.")
-
-    def perch_not_now(self):
-        self.say("No problem. Right-click me any time to set it up.")
-
-    def perch_undo(self):
-        was_on = perch_state() == "on"
-        try:
-            perch_remove()
-        except Exception as e:
-            self.say(f"Couldn't undo it: {e}")
-            return
-        self.say("Done. I'm a normal window again." if was_on else
-                 "Setup undone. Nothing changes at your next login.")
+        self.say_actions("I can stay visible two ways:", [
+            ("Mini Tux: tiny, rides the screen edge", lambda: self.set_mode("mini")),
+            ("Big Tux, kept on top of other windows",
+             lambda: (self.set_mode("free") if self.L.mode == "mini" else None,
+                      self.toggle_on_top(True))),
+            ("Not now", lambda: self.say("No problem. Right-click me any time.")),
+        ])
 
     def say(self, text):
         if bool(text) != bool(self.bubble_text):
@@ -1225,8 +1477,8 @@ class Tux(Gtk.ApplicationWindow):
         self.gen += 1
         if self.idle_src:
             GLib.source_remove(self.idle_src); self.idle_src = None
-        if PERCH_WORDS.search(q) and not clip:  # "stay on top" / "sit on my dock"
-            self.perch_offer()
+        if ON_TOP_WORDS.search(q) and not clip:  # "stay on top" / "sit on my dock"
+            self.on_top_offer()
             return
         target = None if clip else install_target(q)
         if target:  # install / remove / "is X installed": check this machine's real packages
@@ -1362,6 +1614,8 @@ class Tux(Gtk.ApplicationWindow):
 
     def on_close(self, *_):
         self.gen += 1
+        self.remember_free_spot()
+        save_settings(self.settings)
         self.brain.stop()
         return False
 
@@ -1394,6 +1648,28 @@ class App(Gtk.Application):
                     print("no such option:", label, list(win.actions), flush=True)
                 return False
             GLib.timeout_add(700 + 400 * i, click)
+        if os.environ.get("TUX_PROBE"):  # test hook: report how the window really ended up
+            def probe():
+                d = Gdk.Display.get_default()
+                info = {"backend": type(d).__name__, "composited": d.is_composited(),
+                        "rgba": d.is_rgba(), "mode": win.L.mode, "edge": win.L.edge,
+                        "size": (win.get_width(), win.get_height())}
+                if win.x11:
+                    xid = win.xid()
+                    info["pos"] = win.x11.pos(xid)
+                    info["workarea"] = win.x11.workarea()
+                    t, f, n, a, p = (ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(),
+                                     ctypes.c_ulong(), ctypes.c_void_p())
+                    win.x11.X.XGetWindowProperty(win.x11.dpy, xid, win.x11.STATE, 0, 32, 0, 4,
+                                                 ctypes.byref(t), ctypes.byref(f), ctypes.byref(n),
+                                                 ctypes.byref(a), ctypes.byref(p))
+                    st = ([ctypes.cast(p, ctypes.POINTER(ctypes.c_ulong))[i] for i in range(n.value)]
+                          if p.value else [])
+                    info["on_top"] = win.x11.ABOVE in st
+                    info["all_workspaces"] = win.x11.STICKY in st
+                print("probe", json.dumps(info), flush=True)
+                return False
+            GLib.timeout_add(int(os.environ["TUX_PROBE"]), probe)
         if os.environ.get("TUX_SNAPSHOT"):
             GLib.timeout_add(int(os.environ.get("TUX_SNAPSHOT_MS", 1500)),
                              lambda: (snapshot(win, os.environ["TUX_SNAPSHOT"]), False)[-1])
