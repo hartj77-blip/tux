@@ -48,6 +48,7 @@ RECENT_CMDS = 8         # recent terminal commands used for "that"/"it" question
 PORT = 8088
 THREADS = 3            # leave the rest of the CPU for VMs / remote sessions
 IDLE_SECS = int(os.environ.get("TUX_IDLE_SECS", 300))  # unload model after this
+HIDE_SECS = int(os.environ.get("TUX_HIDE_SECS", 20))   # tuck the bubble away after this idle
 MAX_TOKENS = 90
 HISTORY_TURNS = 2
 HELP_MIN_SCORE = 18    # how sure a GNOME Help match must be before Tux uses it
@@ -495,10 +496,15 @@ class Tux(Gtk.ApplicationWindow):
         self.help_uri = None
         self.clip = None             # clipboard text attached to the next question
         self.clip_seen = None        # last clipboard text we looked at
+        self.clip_primed = False     # startup clipboard is old news, not a question
         self.last_copied = None      # what Tux itself copied (never fed back in)
         self.gen = 0
         self.idle_src = None
         self.hover_btns = False
+        self.pointer_in = False      # mouse is over Tux or his bubble
+        self.bubble_hidden = False   # tucked away after HIDE_SECS of nothing happening
+        self.last_activity = time.monotonic()
+        self.tick_src = GLib.timeout_add_seconds(1, self.tick)
         self.boxes = []              # [(x, y, w, h, kind, payload)] clickable bits of the bubble
         self.region_key = None
 
@@ -540,7 +546,7 @@ class Tux(Gtk.ApplicationWindow):
 
         motion = Gtk.EventControllerMotion()
         motion.connect("motion", self.on_motion)
-        motion.connect("leave", lambda *_: self.set_hover(False))
+        motion.connect("leave", self.on_leave)
         self.area.add_controller(motion)
 
         scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
@@ -569,7 +575,7 @@ class Tux(Gtk.ApplicationWindow):
         if not surf:
             return
         s, ox, oy = self.geom()
-        key = (round(s, 3), round(ox), round(oy), bool(self.bubble_text), self.entry.get_visible())
+        key = (round(s, 3), round(ox), round(oy), self.bubble_on(), self.entry.get_visible())
         if key == self.region_key:
             return
         self.region_key = key
@@ -585,7 +591,7 @@ class Tux(Gtk.ApplicationWindow):
             region.union(R(int(ox + (cx - r) * s), int(oy + (cy - r) * s),
                            int(2 * r * s) + 1, int(2 * r * s) + 1))
         rects = [BELLY_ENTRY] if self.entry.get_visible() else []
-        if self.bubble_text:
+        if self.bubble_on():
             bx, by, bw, bh = BUBBLE
             rects += [BUBBLE, (TAIL_TIP[0] - 22, by + bh, 36, TAIL_TIP[1] - by - bh)]
         for x, y, w, h in rects:
@@ -610,7 +616,7 @@ class Tux(Gtk.ApplicationWindow):
         self.draw_buttons(cr)
         cr.restore()
         self.boxes = []
-        if self.bubble_text:
+        if self.bubble_on():
             self.draw_bubble(cr, s, ox, oy)
         self.place_entry(s, ox, oy)
         self.update_input_region()
@@ -730,6 +736,39 @@ class Tux(Gtk.ApplicationWindow):
     def on_motion(self, _ctl, x, y):
         dx, dy = self.to_design(x, y)
         self.set_hover(100 < dx < 260 and 180 < dy < 300)
+        self.pointer_in = True
+        self.touch()
+
+    def on_leave(self, *_):
+        self.pointer_in = False
+        self.set_hover(False)
+
+    # ---- bubble tucks away when nothing's happening, so an on-top Tux stays out of the way
+    def bubble_on(self):
+        return bool(self.bubble_text) and not self.bubble_hidden
+
+    def touch(self):
+        """Something happened: show the bubble and restart the hide countdown."""
+        self.last_activity = time.monotonic()
+        if self.bubble_hidden:
+            self.bubble_hidden = False
+            self.region_key = None
+            self.area.queue_draw()
+        if not self.tick_src:
+            self.tick_src = GLib.timeout_add_seconds(1, self.tick)
+
+    def tick(self):
+        if self.pointer_in or self.entry.get_text():
+            self.last_activity = time.monotonic()
+        if time.monotonic() - self.last_activity < HIDE_SECS:
+            return True
+        self.bubble_hidden = True
+        if not self.entry.get_text():
+            self.entry.set_visible(False)
+        self.region_key = None
+        self.area.queue_draw()
+        self.tick_src = None
+        return False  # stop ticking until something happens
 
     def set_hover(self, v):
         if v != self.hover_btns:
@@ -737,6 +776,7 @@ class Tux(Gtk.ApplicationWindow):
             self.area.queue_draw()
 
     def on_press(self, gesture, n_press, x, y):
+        self.touch()
         dx, dy = self.to_design(x, y)
         dev, btn, t = gesture.get_device(), gesture.get_current_button(), gesture.get_current_event_time()
         surf = self.get_surface()
@@ -757,7 +797,7 @@ class Tux(Gtk.ApplicationWindow):
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
         b = BUBBLE
-        if self.bubble_text and b[0] <= dx <= b[0] + b[2] and b[1] <= dy <= b[1] + b[3]:
+        if self.bubble_on() and b[0] <= dx <= b[0] + b[2] and b[1] <= dy <= b[1] + b[3]:
             if not self.history:  # still on the tip screen: show another tip
                 self.say(self.kb.tip() + "\n\nAsk me anything. Click my belly or just type.")
             return
@@ -775,6 +815,7 @@ class Tux(Gtk.ApplicationWindow):
         return True
 
     def on_key(self, _ctl, keyval, _code, state):
+        self.touch()
         ctrl = state & Gdk.ModifierType.CONTROL_MASK
         if ctrl and keyval in (Gdk.KEY_q, Gdk.KEY_Q, Gdk.KEY_w):
             self.close(); return True
@@ -825,6 +866,10 @@ class Tux(Gtk.ApplicationWindow):
             text = (cb.read_text_finish(res) or "").strip()
         except GLib.Error:
             return
+        if not self.clip_primed:  # first look at startup: note what's there, don't offer it
+            self.clip_primed = True
+            self.clip_seen = text
+            return
         self.accept_clip(text)
 
     def accept_clip(self, text):
@@ -845,6 +890,7 @@ class Tux(Gtk.ApplicationWindow):
         if bool(text) != bool(self.bubble_text):
             self.region_key = None
         self.bubble_text = text
+        self.touch()
         self.area.queue_draw()
         return False
 

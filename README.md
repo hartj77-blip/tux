@@ -40,8 +40,12 @@ sudo apt install python3-pil   # only if you want to use your own Tux picture
 | Drag him | Move |
 | Drag the lines on his right foot / `Ctrl+scroll` | Resize |
 | Yellow / red button on his head | Minimize / close |
+| Hover over him | Brings his speech bubble back (it tucks away after 20 s idle) |
 
-To keep him above other windows: `Super` + right-click him → **Always on Top**.
+**Always visible:** say yes to the *Tux Perch* step in `install.sh` (GNOME only) and Tux
+stands on your dock in the bottom-right corner, above other windows and on every workspace.
+It takes effect after you log out and back in once. Without the extension: `Super` +
+right-click him → **Always on Top**.
 
 ## How it stays fast and light
 

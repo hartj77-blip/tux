@@ -60,4 +60,26 @@ if [ -t 0 ] && ! grep -qF "$MARK" ~/.bashrc 2>/dev/null; then
     fi
 fi
 
+# 7. optional: Tux Perch GNOME extension: on top of other windows, standing on the dock
+UUID="tux-perch@hartj77-blip"
+if [ -t 0 ] && command -v gnome-extensions >/dev/null; then
+    read -rp "Keep Tux on top of other windows, standing on your dock (GNOME extension)? [Y/n] " yn
+    if [[ ! "$yn" =~ ^[Nn] ]]; then
+        ext="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$UUID"
+        mkdir -p "$ext"
+        cp "extension/$UUID/"* "$ext/"
+        # GNOME only discovers new extensions at login, so also add it to the enabled list
+        gnome-extensions enable "$UUID" 2>/dev/null || python3 - "$UUID" <<'PY'
+import ast, subprocess, sys
+uuid = sys.argv[1]
+cur = subprocess.run(["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
+                     capture_output=True, text=True).stdout.strip().removeprefix("@as ")
+exts = ast.literal_eval(cur or "[]")
+if uuid not in exts:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(exts + [uuid])])
+PY
+        echo "  Installed. Log out and back in once and Tux will stand on your dock."
+    fi
+fi
+
 say "Done! Open Tux from your app grid, or run:  python3 $TUX_DIR/tux.py"
