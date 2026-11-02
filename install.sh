@@ -72,4 +72,4 @@ if [ -t 0 ] && ! grep -qF "$MARK" ~/.bashrc 2>/dev/null; then
 fi
 
 say "Done! Open Tux from your app grid, or run:  python3 $TUX_DIR/tux.py"
-echo "   Want him tiny on the screen edge, or kept on top? Right-click Tux → options."
+echo "   Want him tiny on the screen edge, see-through, or kept on top? Right-click Tux → Settings."
