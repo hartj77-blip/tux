@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """One-time prep for Tux (re-run any time):
-  1. cut the white background out of your Tux picture -> tux-art.png + outline runs
-  2. index GNOME Help pages + man page summaries -> index.json
-Usage: python3 setup_tux.py [path/to/tux-image]
+  1. index GNOME Help pages + man page summaries -> index.json
+  2. optional: use your own Tux picture (white background gets cut out)
+     -> tux-art.png + tux-art.json
+Usage: python3 setup_tux.py [path/to/your-tux-image]
 """
 import glob
 import html
@@ -12,13 +13,12 @@ import re
 import subprocess
 import sys
 
-from PIL import Image, ImageDraw, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_ART = os.path.expanduser("~/Desktop/images.jpeg")
 
 
 def make_art(src):
+    from PIL import Image, ImageDraw, ImageFilter  # only needed for custom art
     im = Image.open(src).convert("RGB")
     w, h = im.size
     # flood-fill the white background from every border pixel with a marker colour
@@ -100,5 +100,8 @@ def make_index():
 
 
 if __name__ == "__main__":
-    make_art(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_ART)
     make_index()
+    if len(sys.argv) > 1:
+        make_art(sys.argv[1])
+    elif not os.path.exists(os.path.join(HERE, "tux-art.png")):
+        sys.exit("No tux-art.png: run  python3 setup_tux.py path/to/tux-image")

@@ -7,6 +7,7 @@ you're asking things and stops after IDLE_SECS idle (and when Tux closes).
 Run setup_tux.py once to build tux-art.png and index.json.
 """
 import ctypes
+import glob
 import json
 import math
 import os
@@ -33,12 +34,17 @@ from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo  # noqa: E402
 
 # ---------------------------------------------------------------- settings
 HERE = os.path.dirname(os.path.abspath(__file__))
-SERVER_BIN = os.path.join(HERE, "bin", "llama-b12024", "llama-server")
+SERVER_BIN = next(iter(sorted(glob.glob(os.path.join(HERE, "bin", "*", "llama-server")))),
+                  os.path.join(HERE, "bin", "llama-server"))
 MODEL = os.path.join(HERE, "models", "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf")
 ART_PNG = os.path.join(HERE, "tux-art.png")
 ART_JSON = os.path.join(HERE, "tux-art.json")
 INDEX = os.path.join(HERE, "index.json")
 NOTES = os.path.expanduser("~/Helpful Linux Commands.txt")
+HISTFILE = os.environ.get("HISTFILE", os.path.expanduser("~/.bash_history"))
+VERSION = "2"
+CLIP_MAX = 900          # chars of clipboard text the model sees
+RECENT_CMDS = 8         # recent terminal commands used for "that"/"it" questions
 PORT = 8088
 THREADS = 3            # leave the rest of the CPU for VMs / remote sessions
 IDLE_SECS = int(os.environ.get("TUX_IDLE_SECS", 300))  # unload model after this
@@ -54,7 +60,9 @@ SYSTEM_PROMPT = (
     "desktop, settings, wifi, hardware, apps. Answer in ONE short line, then a ```bash "
     "block if a command helps. For desktop settings, give the Settings path in that line. "
     "At most one 'Pro tip:' line. Never pad. Use the Reference if relevant. Warn on "
-    "destructive commands. Only for clearly non-computer topics (sports, jokes, poems) "
+    "destructive commands. If Clipboard or Recent commands are given, that's what the "
+    "user means by this/that/it (the last command is the likeliest), and never refuse "
+    "then. Only for clearly non-computer topics (sports, jokes, poems) "
     "reply exactly: I only know Linux stuff!"
 )
 FEWSHOT = [
@@ -67,8 +75,19 @@ FEWSHOT = [
     ("make the text bigger",
      "Settings → Accessibility → Large Text, or:\n"
      "```bash\ngsettings set org.gnome.desktop.interface text-scaling-factor 1.25\n```"),
+    ("what's this?\n\nClipboard:\n```\nE: Could not get lock /var/lib/dpkg/lock-frontend\n```",
+     "Another apt/updater is running. Wait for it, or see who:\n"
+     "```bash\nps aux | grep -E 'apt|dpkg' | grep -v grep\n```\nDon't delete the lock file."),
+    ("why did that fail?\n\nRecent terminal commands (last = most recent):\ncd ~/app\nnpm start",
+     "Looks like `npm start`. Usually missing packages:\n```bash\nnpm install\n```\n"
+     "Copy the error and click me for an exact fix."),
     ("tell me a joke", "I only know Linux stuff!"),
 ]
+# questions that point at something: "why did that fail", "undo it", "explain this"
+REFERS = re.compile(r"\b(this|that|it|these|those|last|previous|just|above|error|failed|"
+                    r"fail|wrong|why|explain|mean|means|undo|again|fix)\b", re.I)
+SECRETS = re.compile(r"pass(word|wd)?|token|secret|api[_-]?key|private|authorization|"
+                     r"bearer|--pass|credential", re.I)
 # hand-picked, safe power-user moves: shown instantly for "tip"/"trick" questions
 POWER_TIPS = [
     ("sudo !!", "rerun the last command with sudo"),
@@ -138,9 +157,9 @@ QUICK = [
     (["log logs error errors"], "This boot's errors:\n```bash\njournalctl -b -p err\n```"),
     (["ssh", "key keys"],
      "Make a key, send it to the server:\n```bash\nssh-keygen -t ed25519\nssh-copy-id user@host\n```"),
-    (["vm vms virtual win11 windows", "start run boot list stop shutdown"],
-     "Your VMs:\n```bash\nvirsh -c qemu:///system list --all\nvirsh -c qemu:///system start win11\n```\n"
-     "`shutdown win11` to stop it cleanly."),
+    (["vm vms virtual", "start run boot list stop shutdown"],
+     "Your VMs, then start one by name:\n```bash\nvirsh -c qemu:///system list --all\n"
+     "virsh -c qemu:///system start NAME\n```\n`shutdown NAME` stops it cleanly."),
     (["permission denied"],
      "Check owner and perms:\n```bash\nls -l file\n```\nScript? `chmod +x file`. Owned by root? `sudo chown $USER file`."),
     (["find locate where", "file named called name"],
@@ -188,6 +207,7 @@ class Brain:
     def __init__(self):
         self.proc = None
         self.lock = threading.Lock()
+        self.req_lock = threading.Lock()   # one request at a time (prewarm vs. real question)
 
     def healthy(self):
         try:
@@ -209,9 +229,23 @@ class Brain:
                 if shutil.which("ionice"):
                     cmd = ["ionice", "-c3"] + cmd
                 env = dict(os.environ, LD_LIBRARY_PATH=os.path.dirname(SERVER_BIN))
-                self.proc = subprocess.Popen(
-                    cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    preexec_fn=_child_setup)
+                # Spawn from the main thread: the "die with Tux" signal (PDEATHSIG) fires
+                # when the *thread* that spawned the child exits, and worker threads are
+                # short-lived, which killed the server mid-answer.
+                done = threading.Event()
+
+                def spawn():
+                    self.proc = subprocess.Popen(
+                        cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        preexec_fn=_child_setup)
+                    done.set()
+                    return False
+                if threading.current_thread() is threading.main_thread():
+                    spawn()
+                else:
+                    GLib.idle_add(spawn)
+                    if not done.wait(10):
+                        return False
             for _ in range(600):  # up to 60 s
                 if self.healthy():
                     return True
@@ -233,7 +267,7 @@ class Brain:
 def _child_setup():
     os.nice(15)
     try:  # die with Tux even if Tux crashes
-        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGTERM)
+        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGKILL)
     except Exception:
         pass
 
@@ -347,10 +381,39 @@ class Knowledge:
     def tip(self, n=1):
         pool = POWER_TIPS + [(c, d) for c, d, _ in random.sample(self.notes, min(8, len(self.notes)))]
         picks = random.sample(pool, n)
-        return "\n".join(f"Pro tip: `{c}` → {d}" for c, d in picks)
+        if n == 1:
+            return f"Pro tip: `{picks[0][0]}` → {picks[0][1]}"
+        return "\n".join(f"• `{c}` → {d}" for c, d in picks)
 
 
-def build_messages(q, history, hp, mans, note):
+SHELL_WORDS = set("cd export source . alias unalias history echo exit set unset type "
+                  "sudo pushd popd jobs fg bg kill ulimit umask read wait for if while".split())
+
+
+def recent_commands(n=RECENT_CMDS):
+    """Last few terminal commands from bash history, minus anything secret-looking."""
+    try:
+        with open(HISTFILE, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 8192))
+            lines = f.read().decode("utf-8", "ignore").splitlines()[1:]
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line or line.startswith("#") or SECRETS.search(line) or line in out:
+            continue
+        first = line.split()[0]
+        if first not in SHELL_WORDS and not shutil.which(first):
+            continue  # not a command (e.g. text typed into some other program)
+        out.append(line[:100])
+        if len(out) == n:
+            break
+    return out[::-1]
+
+
+def build_messages(q, history, hp, mans, note, clip=None, recent=None):
     """System prompt + style examples + recent chat + question with its References."""
     refs = []
     if hp:
@@ -360,6 +423,10 @@ def build_messages(q, history, hp, mans, note):
     if note:
         refs.append(f"user's notes: {note[0]} : {note[1]}")
     user = q + ("\n\nReference:\n- " + "\n- ".join(refs) if refs else "")
+    if recent:
+        user += "\n\nRecent terminal commands (last = most recent):\n" + "\n".join(recent)
+    if clip:
+        user += "\n\nClipboard:\n```\n" + clip[:CLIP_MAX] + "\n```"
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     for uq, ua in FEWSHOT + history[-HISTORY_TURNS:]:
         msgs += [{"role": "user", "content": uq}, {"role": "assistant", "content": ua}]
@@ -385,6 +452,10 @@ def parse_answer(text):
             blocks.append(("cmd", m.group(1).strip()))
         elif line.startswith("📖 "):
             blocks.append(("help", line))
+        elif line.startswith("📋 "):
+            blocks.append(("clip", line))
+        elif line.startswith("⌨ "):
+            blocks.append(("ctx", line))
         elif line.strip():
             blocks.append(("text", line.strip()))
     return blocks
@@ -422,6 +493,9 @@ class Tux(Gtk.ApplicationWindow):
         self.history = []
         self.bubble_text = self.kb.tip() + "\n\nAsk me anything. Click my belly or just type."
         self.help_uri = None
+        self.clip = None             # clipboard text attached to the next question
+        self.clip_seen = None        # last clipboard text we looked at
+        self.last_copied = None      # what Tux itself copied (never fed back in)
         self.gen = 0
         self.idle_src = None
         self.hover_btns = False
@@ -454,6 +528,11 @@ class Tux(Gtk.ApplicationWindow):
         click = Gtk.GestureClick(button=1)
         click.connect("pressed", self.on_press)
         self.area.add_controller(click)
+        rclick = Gtk.GestureClick(button=3)  # right-click the bubble: copy the whole answer
+        rclick.connect("pressed", lambda *_: self.copy_answer())
+        self.area.add_controller(rclick)
+        # coming back to Tux (e.g. after copying an error): look at the clipboard
+        self.connect("notify::is-active", lambda *_: self.is_active() and self.check_clipboard())
 
         motion = Gtk.EventControllerMotion()
         motion.connect("motion", self.on_motion)
@@ -591,6 +670,10 @@ class Tux(Gtk.ApplicationWindow):
                     lay.set_text(txt, -1)
                 elif kind == "help":
                     lay.set_markup(f"<span foreground='#1a5fb4'><u>{esc(txt)}</u></span>", -1)
+                elif kind == "clip":
+                    lay.set_markup(f"<span foreground='#8a4b00'>{esc(txt)}</span>", -1)
+                elif kind == "ctx":
+                    lay.set_markup(f"<span foreground='#666666'><small>{esc(txt)}</small></span>", -1)
                 else:
                     lay.set_markup(inline_markup(txt), -1)
                 lh = lay.get_pixel_size()[1] + (8 * s if kind == "cmd" else 0)
@@ -612,6 +695,8 @@ class Tux(Gtk.ApplicationWindow):
             else:
                 if kind == "help":
                     self.boxes.append((X + pad, y, tw, lh, "help", self.help_uri))
+                elif kind == "clip":
+                    self.boxes.append((X + pad, y, tw, lh, "clip", None))
                 cr.set_source_rgb(0.08, 0.08, 0.1)
                 cr.move_to(X + pad, y)
             PangoCairo.show_layout(cr, lay)
@@ -661,6 +746,8 @@ class Tux(Gtk.ApplicationWindow):
             if bx <= x <= bx + bw and by <= y <= by + bh:
                 if kind == "cmd":
                     self.copy(payload)
+                elif kind == "clip":
+                    self.drop_clip()
                 elif payload:
                     subprocess.Popen(["yelp", payload], start_new_session=True,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -687,6 +774,11 @@ class Tux(Gtk.ApplicationWindow):
         ctrl = state & Gdk.ModifierType.CONTROL_MASK
         if ctrl and keyval in (Gdk.KEY_q, Gdk.KEY_Q, Gdk.KEY_w):
             self.close(); return True
+        if ctrl and keyval in (Gdk.KEY_c, Gdk.KEY_C):
+            cmd = first_command(self.bubble_text)
+            if cmd:
+                self.copy(cmd)
+            return True
         if keyval == Gdk.KEY_Escape:
             if self.entry.get_visible():
                 self.entry.set_visible(False); self.region_key = None; self.area.queue_draw()
@@ -699,6 +791,7 @@ class Tux(Gtk.ApplicationWindow):
     def show_entry(self, prefix=""):
         if not self.entry.get_visible():
             threading.Thread(target=self.prewarm, args=(self.gen,), daemon=True).start()
+            self.check_clipboard()
         self.entry.set_visible(True)
         self.region_key = None
         self.area.queue_draw()
@@ -708,9 +801,41 @@ class Tux(Gtk.ApplicationWindow):
             self.entry.set_position(-1)
 
     def copy(self, text):
+        self.last_copied = text
         self.get_clipboard().set(text)
         if "(copied" not in self.bubble_text:
             self.say(self.bubble_text.rstrip() + "\n(copied ✓)")
+
+    def copy_answer(self):
+        """Whole answer as plain text: no ``` fences, no Help link."""
+        lines = [s for k, s in parse_answer(self.bubble_text) if k in ("text", "cmd")]
+        text = "\n".join(l for l in lines if l != "(copied ✓)").strip()
+        if text:
+            self.copy(text)
+
+    def check_clipboard(self):
+        self.get_clipboard().read_text_async(None, self.on_clipboard)
+
+    def on_clipboard(self, cb, res):
+        try:
+            text = (cb.read_text_finish(res) or "").strip()
+        except GLib.Error:
+            return
+        self.accept_clip(text)
+
+    def accept_clip(self, text):
+        if not text or text == self.clip_seen or text == self.last_copied or len(text) > 6000:
+            return
+        self.clip_seen = text
+        self.clip = text
+        snippet = " ".join(text.split())[:48] + ("…" if len(text) > 48 else "")
+        self.say(f"📋 {snippet}  ✕\nHit Enter to explain it, or ask \"what's this?\"")
+        if not self.entry.get_visible():
+            self.show_entry()
+
+    def drop_clip(self):
+        self.clip = None
+        self.say("Clipboard dropped. Ask away.")
 
     def say(self, text):
         if bool(text) != bool(self.bubble_text):
@@ -723,25 +848,41 @@ class Tux(Gtk.ApplicationWindow):
     def on_submit(self, entry):
         q = entry.get_text().strip()
         entry.set_text("")
-        if not q:
+        clip, self.clip = self.clip, None
+        if not q and not clip:
             return
+        refers = bool(REFERS.search(q)) or not q
+        if clip and not refers:
+            clip = None  # you asked about something else: leave the clipboard out of it
+        search_text = q
+        if not q:
+            q = "Explain this. If it's an error, how do I fix it?"
+            search_text = clip[:300]
         self.gen += 1
         if self.idle_src:
             GLib.source_remove(self.idle_src); self.idle_src = None
-        if TIP_WORDS.search(q):  # tips come from the curated list, instantly, no model
+        if TIP_WORDS.search(q) and not clip:  # tips come from the curated list, instantly, no model
             self.say("Power moves:\n" + self.kb.tip(3))
             return
-        hp, mans, note = self.kb.search(q)
+        hp, mans, note = self.kb.search(search_text + (" " + clip[:300] if clip and search_text == q else ""))
         self.help_uri = hp["uri"] if hp else None
-        quick = self.kb.quick(q)
+        quick = None if (clip or refers) else self.kb.quick(q)
         if quick:  # hand-checked answer: instant, no model
             self.say(quick + (f"\n📖 {hp['title']} ›" if hp else ""))
             return
         # instant answer from your notes while the model thinks
-        self.say(f"From your notes:\n`{note[0]}`\n\nthinking…" if note else "thinking…")
-        threading.Thread(target=self.ask, args=(q, self.gen, hp, mans, note), daemon=True).start()
+        recent = recent_commands() if refers and not clip else None
+        ctx = []
+        if clip:
+            ctx.append("📋 reading your clipboard")
+        if recent:
+            ctx.append(f"⌨ using your last {len(recent)} terminal commands")
+        pre = "\n".join(ctx) + ("\n" if ctx else "")
+        self.say(pre + (f"From your notes:\n`{note[0]}`\n\nthinking…" if note else "thinking…"))
+        threading.Thread(target=self.ask, args=(q, self.gen, hp, mans, note, clip, recent),
+                         daemon=True).start()
 
-    def ask(self, q, gen, hp, mans, note):
+    def ask(self, q, gen, hp, mans, note, clip=None, recent=None):
         def status(msg):
             if gen == self.gen:
                 GLib.idle_add(self.say, msg)
@@ -752,13 +893,14 @@ class Tux(Gtk.ApplicationWindow):
         if not self.brain.ensure(status):
             status("Couldn't start my brain (llama-server). Try again?")
             return
-        msgs = build_messages(q, self.history, hp, mans, note)
-        body = json.dumps({"messages": msgs, "stream": True, "max_tokens": MAX_TOKENS,
+        msgs = build_messages(q, self.history, hp, mans, note, clip, recent)
+        body = json.dumps({"messages": msgs, "stream": True, "max_tokens": MAX_TOKENS + (40 if clip or recent else 0),
                            "temperature": 0.2, "cache_prompt": True}).encode()
         req = urllib.request.Request(URL + "/v1/chat/completions", body,
                                      {"Content-Type": "application/json"})
         out = ""
         footer = f"\n📖 {hp['title']} ›" if hp else ""
+        self.brain.req_lock.acquire()
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 last = 0.0
@@ -783,7 +925,13 @@ class Tux(Gtk.ApplicationWindow):
         except Exception as e:
             status(f"Oops, my brain hiccuped: {e}")
             return
+        finally:
+            self.brain.req_lock.release()
         out = out.strip()
+        if recent and "only know Linux" in out:
+            # the model can't see command output; be straight about it instead of refusing
+            out = (f"Last command: `{recent[-1]}`\nI can't see its output. "
+                   "Copy the error and click me for an exact fix.")
         status(out + footer if "only know Linux" not in out else out)
         self.history.append((q, out))
         self.history = self.history[-HISTORY_TURNS:]
@@ -797,12 +945,16 @@ class Tux(Gtk.ApplicationWindow):
             return
         body = json.dumps({"messages": build_messages("hi", [], None, [], None),
                            "max_tokens": 1, "cache_prompt": True}).encode()
+        if not self.brain.req_lock.acquire(blocking=False):
+            return  # a real question is already running
         try:
             urllib.request.urlopen(urllib.request.Request(
                 URL + "/v1/chat/completions", body, {"Content-Type": "application/json"}),
                 timeout=60).read()
         except Exception:
             pass
+        finally:
+            self.brain.req_lock.release()
         GLib.idle_add(self.arm_idle_timer, gen)
 
     def arm_idle_timer(self, gen):
@@ -826,15 +978,19 @@ class Tux(Gtk.ApplicationWindow):
 
 class App(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="local.tux.helper")
+        # TUX_TEST=1: separate instance for tests, so it never hijacks your open Tux
+        test = bool(os.environ.get("TUX_TEST"))
+        super().__init__(application_id="local.tux.helper" + (".test" if test else ""))
 
     def do_activate(self):
-        if not (os.path.exists(ART_PNG) and os.path.exists(INDEX)):
+        if not os.path.exists(INDEX):  # first run: build the Help/man index
             subprocess.run(["python3", os.path.join(HERE, "setup_tux.py")])
         win = self.get_active_window() or Tux(self)
         win.present()
         # test hooks: TUX_ASK="question" auto-asks, TUX_SNAPSHOT=file.png saves a render
-        if os.environ.get("TUX_ASK"):
+        if os.environ.get("TUX_CLIP"):  # test hook: pretend this was just copied
+            GLib.timeout_add(300, lambda: (win.accept_clip(os.environ["TUX_CLIP"]), False)[-1])
+        if os.environ.get("TUX_ASK") is not None:
             GLib.timeout_add(500, lambda: (win.entry.set_text(os.environ["TUX_ASK"]),
                                            win.on_submit(win.entry), False)[-1])
         if os.environ.get("TUX_SNAPSHOT"):

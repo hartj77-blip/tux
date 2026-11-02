@@ -2,8 +2,8 @@
 Type=Application
 Name=Tux
 Comment=Tiny local Linux helper
-Exec=python3 /home/hack/tux/tux.py
-Icon=/home/hack/tux/tux-art.png
+Exec=python3 @TUX_DIR@/tux.py
+Icon=@TUX_DIR@/tux-art.png
 Terminal=false
 Categories=Utility;
 StartupWMClass=local.tux.helper
