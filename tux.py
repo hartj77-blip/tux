@@ -25,6 +25,8 @@ import warnings
 import cairo
 import gi
 
+from knowledge import Library, best_window  # Tux's offline Linux library
+
 # software rendering: ~half the RAM of GTK's GL renderer and leaves the GPU alone
 os.environ.setdefault("GSK_RENDERER", "cairo")
 # GNOME on Wayland doesn't let apps stay on top or place themselves; X11 apps may. So Tux
@@ -68,7 +70,8 @@ SYSTEM_PROMPT = (
     "systemd, NetworkManager). Everything about using the computer counts: terminal, "
     "desktop, settings, wifi, hardware, apps. Answer in ONE short line, then a ```bash "
     "block if a command helps. For desktop settings, give the Settings path in that line. "
-    "At most one 'Pro tip:' line. Never pad. Use the Reference if relevant. Warn on "
+    "At most one 'Pro tip:' line. Never pad. Use the Reference if relevant; ArchWiki "
+    "snippets are for Arch Linux, so turn pacman into apt (package names can differ). Warn on "
     "destructive commands. If Clipboard or Recent commands are given, that's what the "
     "user means by this/that/it (the last command is the likeliest), and never refuse "
     "then. Only for clearly non-computer topics (sports, jokes, poems) "
@@ -159,11 +162,13 @@ QUICK = [
     (["version release", "ubuntu os"], "```bash\nlsb_release -a\n```"),
     (["kernel"], "```bash\nuname -r\n```"),
     (["deb"], "Install a .deb (pulls in its dependencies):\n```bash\nsudo apt install ./file.deb\n```"),
-    (["tar tgz untar"], "Extract any tarball (gz/xz/bz2 auto-detected):\n```bash\ntar -xf file.tar.gz\n```"),
-    (["unzip zip"], "```bash\nunzip file.zip -d folder/\n```"),
+    (["tar tgz untar", "extract untar open unpack decompress unzip"], "Extract any tarball (gz/xz/bz2 auto-detected):\n```bash\ntar -xf file.tar.gz\n```"),
+    (["unzip"], "```bash\nunzip file.zip -d folder/\n```"),
+    (["zip", "folder directory create make compress"],
+     "Zip a folder (and everything in it):\n```bash\nzip -r folder.zip folder/\n```"),
     (["service services", "fail failed failing broken crash crashed"],
      "```bash\nsystemctl --failed\n```\nThen `journalctl -u name -b` for why."),
-    (["log logs error errors"], "This boot's errors:\n```bash\njournalctl -b -p err\n```"),
+    (["log logs error errors", "error errors boot system crash wrong"], "This boot's errors:\n```bash\njournalctl -b -p err\n```"),
     (["ssh", "key keys"],
      "Make a key, send it to the server:\n```bash\nssh-keygen -t ed25519\nssh-copy-id user@host\n```"),
     (["vm vms virtual", "start run boot list stop shutdown"],
@@ -171,7 +176,7 @@ QUICK = [
      "virsh -c qemu:///system start NAME\n```\n`shutdown NAME` stops it cleanly."),
     (["permission denied"],
      "Check owner and perms:\n```bash\nls -l file\n```\nScript? `chmod +x file`. Owned by root? `sudo chown $USER file`."),
-    (["find locate where", "file named called name"],
+    (["find locate where", "named called name"],
      "Find by name (case-insensitive):\n```bash\nfind ~ -iname '*name*' 2>/dev/null\n```"),
     (["printer printing"],
      "Settings → Printers: check it's listed and not paused. Clear stuck jobs and restart printing:\n"
@@ -623,7 +628,8 @@ def _child_setup():
 STOP = set("the a an to of in on for and or is how do i my what can with from it this that "
            "you me show get use using does make want need why when where which are be "
            "there not way all any some into out up its your have has will just everything "
-           "working work problem issue help fix please".split())
+           "working work problem issue help fix please but into than also only onto each "
+           "every via per then other another".split())
 SYNONYMS = {
     "wifi": "wireless network", "internet": "network", "folder": "directory folder",
     "delete": "remove delete", "erase": "remove delete", "drive": "disk drive",
@@ -672,7 +678,8 @@ class Knowledge:
                     self.notes.append((cmd.strip(), desc.strip(), words(cmd + " " + desc)))
         except OSError:
             pass
-        self.help, self.man = [], []
+        self.help, self.man, self.man_names = [], [], set()
+        self.lib = Library()  # offline man pages / tldr / Arch Wiki (knowledge.py)
         try:
             idx = json.load(open(INDEX))
             for p in idx["help"]:
@@ -680,6 +687,7 @@ class Knowledge:
                 del p["words"]
                 self.help.append(p)
             self.man = [(n, d, words(d)) for n, d in idx["man"]]
+            self.man_names = {n.lower() for n, _, _ in self.man}
             df = {}
             for p in self.help:
                 for w in p["tw"] | p["dw"]:
@@ -762,15 +770,201 @@ def recent_commands(n=RECENT_CMDS):
     return out[::-1]
 
 
-def build_messages(q, history, hp, mans, note, clip=None, recent=None):
+# ---------------------------------------------------------------- offline library lookups
+# words that are also command names but almost always mean the plain word in a question
+COMMON_WORDS = set("file files time date free test install link more less last write users "
+                   "groups join split sort which who what make get top watch screen service "
+                   "display help info man open print read sleep stat true false yes see look "
+                   "line lines size list show set run start stop update power sound keyboard "
+                   "mouse network printer disk dir env id w from at as cd col tr wall".split())
+# never run these, even with --help
+NO_HELP = set("reboot shutdown poweroff halt init telinit rm dd shred wipefs fdisk sfdisk cfdisk "
+              "parted gparted kill killall pkill sudo su login passwd yes xdg-open logout "
+              "gnome-session-quit mkswap swapoff swapon format reset".split())
+REFS_MAX = 700    # characters of reference material per question (keeps answers quick)
+# Feed library snippets to the model? Measured on the 1.5B model: answers were no better on
+# average (some worse, ~2 s slower to start), so the library is used for instant tldr
+# answers, source links and "more examples" instead. Worth turning on with a bigger model.
+USE_LIBRARY_IN_PROMPT = False
+
+
+def live_help(cmd, terms, max_lines=5):
+    """The lines of `cmd --help` that match the question (well-behaved tools only)."""
+    if cmd in NO_HELP or cmd.startswith("mkfs") or not shutil.which(cmd):
+        return []
+    try:
+        r = subprocess.run([cmd, "--help"], capture_output=True, text=True, timeout=1.5,
+                           stdin=subprocess.DEVNULL, env=dict(clean_env(), LC_ALL="C", PAGER="cat"))
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    groups = _groups(terms)
+    hits = []
+    for line in (r.stdout or r.stderr)[:20000].splitlines():
+        line = line.strip()
+        if line.startswith("-") and _hits(line, groups):
+            hits.append(re.sub(r"\s+", " ", line)[:110])
+            if len(hits) >= max_lines:
+                break
+    return hits
+
+
+# extra spellings a doc might use for a question word
+DOC_SYNONYMS = {"folder": "directory", "folders": "directories", "changed": "modified",
+                "change": "modify", "delete": "remove", "erase": "remove", "skip": "exclude",
+                "ignore": "exclude", "biggest": "size", "largest": "size", "size": "sizes",
+                "running": "process", "show": "list", "see": "list", "copy": "transfer",
+                "download": "fetch", "hour": "minutes", "unzip": "extract", "untar": "extract",
+                "computer": "host", "server": "host", "machine": "host", "pc": "host"}
+
+
+def question_terms(q, man_names):
+    """(command named in the question or None, the other meaningful words)."""
+    raw = []
+    for w in re.findall(r"[A-Za-z0-9][\w.+-]*", q):
+        w = w.lower().strip(".")
+        raw.append(w)
+        if "." in w:  # tar.gz -> tar, gz
+            raw += [p for p in w.split(".") if p]
+    command = next((w for w in raw if w in man_names and w not in COMMON_WORDS and w not in STOP), None)
+    terms = [w for w in raw if w not in STOP and len(w) > 1]
+    other = [t for t in terms if t != command and t not in ("gz", "xz", "bz2")]
+    return command, other
+
+
+def _groups(terms):
+    """One stem group per question word: the word and its doc spelling, 5-letter stems."""
+    out = []
+    for t in terms:
+        if len(t) <= 2:
+            continue
+        g = {t[:5]}
+        if t in DOC_SYNONYMS:
+            g.add(DOC_SYNONYMS[t][:5])
+        out.append(g)
+    return out
+
+
+def _hits(line, groups):
+    low = re.sub(r"[\[\]]", "", line.lower())  # tldr writes E[x]tract
+    return sum(1 for g in groups if any(st in low for st in g))
+
+
+def _tldr_examples(lib, command, groups):
+    """[(hits, example line)] from the command's own tldr page."""
+    out = []
+    for r in lib.search([command], command, limit=3):
+        if r["source"] == "tldr" and r["title"] == command:
+            for line in r["body"].splitlines():
+                if line.startswith("- "):
+                    h = _hits(line, groups)
+                    if h:
+                        out.append((h, line[2:]))
+    out.sort(key=lambda e: -e[0])
+    return out
+
+
+def _tidy_tldr(desc, cmd, asked=()):
+    desc = re.sub(r"\[(\w)\]", r"\1", desc)                      # E[x]tract -> Extract
+    cmd = re.sub(r"\[(-[^|\]]+)\|[^\]]+\]", r"\1", cmd)          # [-i|--ignore-case] -> -i
+    asked = set(asked)
+    cmd = re.sub(r"(?<![\w/-])([\w-]+(?:\|[\w-]+)+)",            # start|stop|restart -> restart
+                 lambda mm: next((w for w in mm.group(1).split("|") if w in asked),
+                                 mm.group(1).split("|")[0]), cmd)
+    return desc, cmd
+
+
+def tldr_examples_text(lib, command, n=3):
+    """The first few examples from a command's tldr page, ready for the bubble."""
+    if not lib or not command:
+        return None
+    for r in lib.search([command], command, limit=3):
+        if r["source"] == "tldr" and r["title"] == command:
+            parts = []
+            for line in r["body"].splitlines():
+                m = re.match(r"- (.*?):\s*`(.*)`\s*$", line)
+                if m:
+                    desc, cmd = _tidy_tldr(m.group(1), m.group(2))
+                    parts.append(f"{desc}:\n```bash\n{cmd}\n```")
+                if len(parts) == n:
+                    break
+            if parts:
+                return "\n".join(parts) + f"\n📖 man {command} ›"
+    return None
+
+
+def tldr_answer(lib, man_names, q):
+    """An instant answer from tldr when one example clearly matches the question."""
+    if not lib:
+        return None
+    command, other = question_terms(q, man_names)
+    groups = _groups(other)
+    if not command or not groups:
+        return None
+    ex = _tldr_examples(lib, command, groups)
+    need = len(groups) if len(groups) <= 3 else -(-len(groups) * 3 // 4)
+    if not ex or ex[0][0] < need:  # must cover (nearly) every word of the question
+        return None
+    m = re.match(r"(.*?):\s*`(.*)`\s*$", ex[0][1])
+    if not m:
+        return None
+    desc, cmd = _tidy_tldr(m.group(1), m.group(2), other)
+    return f"{desc}:\n```bash\n{cmd}\n```\n📖 man {command} ›"
+
+
+def library_refs(lib, man_names, q):
+    """A few lines that directly answer the question, plus a link to the source.
+
+    A 1.5B model copies whatever it's shown, so this is strict: matching tldr example lines,
+    matching --help / man option lines, and at most one Arch Wiki snippet (general topics only).
+    """
+    command, other = question_terms(q, man_names)
+    refs, link = [], None
+    if not lib or not (other or command):
+        return refs, link
+    groups = _groups(other)
+    if command:
+        ex = _tldr_examples(lib, command, groups)
+        if ex:
+            refs.append(f"tldr {command}: " + " | ".join(e for _, e in ex[:2]))
+        # option lines that match, from live --help, else from the man page
+        opts = live_help(command, other, max_lines=3) if groups else []
+        if not opts and groups:
+            for r in lib.search(other or [command], command, limit=4):
+                if r["source"] == "man" and r["title"] == command:
+                    for m in re.finditer(r"(?m)^\s*(-{1,2}[\w][^\n]{0,110})", r["body"]):
+                        if _hits(m.group(1), groups):
+                            opts.append(re.sub(r"\s+", " ", m.group(1)))
+            opts = opts[:3]
+        if opts:
+            refs.append(f"{command} options: " + " | ".join(opts))
+        link = (f"man {command}", f"man:{command}")
+    else:
+        rows = [r for r in lib.search(other, None, limit=4) if r["source"] == "arch"]
+        for r in rows:  # only if the page title or section is about the question
+            if _hits(r["title"] + " " + r["heading"], groups):
+                refs.append(f"ArchWiki (Arch Linux docs) '{r['title']} › {r['heading']}': "
+                            + best_window(r["body"], other, 260))
+                link = (f"ArchWiki: {r['title']}", r["ref"].split("#")[0])  # whole page
+                break
+    return refs, link
+
+
+def build_messages(q, history, hp, mans, note, clip=None, recent=None, lib_refs=None):
     """System prompt + style examples + recent chat + question with its References."""
-    refs = []
+    refs = list(lib_refs or [])
     if hp:
         steps = " / ".join(hp["steps"][:2])
-        refs.append(f"GNOME Help '{hp['title']}': {hp['desc']} {steps}"[:260])
+        refs.insert(0, f"GNOME Help '{hp['title']}': {hp['desc']} {steps}"[:260])
     refs += [f"man {n}: {d}" for n, d in mans]
     if note:
         refs.append(f"user's notes: {note[0]} : {note[1]}")
+    kept, used = [], 0
+    for r in refs:  # keep the prompt short so answers stay quick
+        if used + len(r) > REFS_MAX:
+            break
+        kept.append(r)
+        used += len(r)
+    refs = kept
     user = q + ("\n\nReference:\n- " + "\n- ".join(refs) if refs else "")
     if recent:
         user += "\n\nRecent terminal commands (last = most recent):\n" + "\n".join(recent)
@@ -1203,7 +1397,9 @@ class Tux(Gtk.ApplicationWindow):
                     if fn:
                         fn()
                 elif payload:
-                    subprocess.Popen(["yelp", payload], start_new_session=True, env=clean_env(),
+                    # Help pages + man pages open in Help; Arch Wiki pages in the browser
+                    opener = "xdg-open" if payload.startswith("file://") else "yelp"
+                    subprocess.Popen([opener, payload], start_new_session=True, env=clean_env(),
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
         b = self.L.BUBBLE
@@ -1440,6 +1636,10 @@ class Tux(Gtk.ApplicationWindow):
         note = "" if self.x11 else "\n(Staying on top and riding the edges need XWayland.)"
         self.say_actions("Options:" + note, opts)
 
+    def show_examples(self, text, command):
+        self.help_uri = f"man:{command}"
+        self.say(text)
+
     def tuck_bubble(self):
         self.last_activity = 0
         self.pointer_in = False
@@ -1501,6 +1701,11 @@ class Tux(Gtk.ApplicationWindow):
         if quick:  # hand-checked answer: instant, no model
             self.say(quick + (f"\n📖 {hp['title']} ›" if hp else ""))
             return
+        tl = None if (clip or refers) else tldr_answer(self.kb.lib, self.kb.man_names, q)
+        if tl:  # a tldr example that clearly matches: instant, and checked by the tldr project
+            self.help_uri = "man:" + tl.rsplit("man ", 1)[1].rstrip(" ›")
+            self.say(tl)
+            return
         # instant answer from your notes while the model thinks
         recent = recent_commands() if refers and not clip else None
         ctx = []
@@ -1541,13 +1746,17 @@ class Tux(Gtk.ApplicationWindow):
         if not self.brain.ensure(status):
             status("Couldn't start my brain (llama-server). Try again?")
             return
-        msgs = build_messages(q, self.history, hp, mans, note, clip, recent)
+        lib_refs, link = library_refs(self.kb.lib, self.kb.man_names, q)
+        msgs = build_messages(q, self.history, hp, mans, note, clip, recent,
+                              lib_refs if USE_LIBRARY_IN_PROMPT else None)
         body = json.dumps({"messages": msgs, "stream": True, "max_tokens": MAX_TOKENS + (40 if clip or recent else 0),
                            "temperature": 0.2, "cache_prompt": True}).encode()
         req = urllib.request.Request(URL + "/v1/chat/completions", body,
                                      {"Content-Type": "application/json"})
         out = ""
         footer = f"\n📖 {hp['title']} ›" if hp else ""
+        if not hp and link:  # Arch Wiki section (opens locally) or the man page (in Help)
+            footer, self.help_uri = f"\n📖 {link[0]} ›", link[1]
         self.brain.req_lock.acquire()
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
@@ -1580,7 +1789,17 @@ class Tux(Gtk.ApplicationWindow):
             # the model can't see command output; be straight about it instead of refusing
             out = (f"Last command: `{recent[-1]}`\nI can't see its output. "
                    "Copy the error and click me for an exact fix.")
-        status(out + footer if "only know Linux" not in out else out)
+        if "only know Linux" in out:
+            status(out)
+        else:
+            command = question_terms(q, self.kb.man_names)[0]
+            more = tldr_examples_text(self.kb.lib, command) if command else None
+            if more and gen == self.gen:  # offer the command's real tldr examples
+                label = f"More {command} examples"
+                GLib.idle_add(self.say_actions, out + footer,
+                              [(label, lambda t=more, c=command: self.show_examples(t, c))])
+            else:
+                status(out + footer)
         self.history.append((q, out))
         self.history = self.history[-HISTORY_TURNS:]
         GLib.idle_add(self.arm_idle_timer, gen)
