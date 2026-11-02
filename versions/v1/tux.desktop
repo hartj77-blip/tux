@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tux
+Comment=Tiny local Linux helper
+Exec=python3 /home/hack/tux/tux.py
+Icon=/home/hack/tux/tux-art.png
+Terminal=false
+Categories=Utility;
+StartupWMClass=local.tux.helper

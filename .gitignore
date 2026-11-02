@@ -1,0 +1,4 @@
+bin/
+models/
+__pycache__/
+index.json
