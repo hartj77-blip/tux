@@ -41,20 +41,33 @@ sudo apt install python3-pil   # only if you want to use your own Tux picture
 | Drag him | Move |
 | Drag the lines on his right foot / `Ctrl+scroll` | Resize |
 | Yellow / red button on his head | Minimize / close |
-| Hover over him | Brings his speech bubble back (it tucks away after 20 s idle) |
-| Right-click him | Options: switch Free/Mini Tux, keep on top, a power tip, tuck the bubble away |
+| Hover over him | Brings his speech bubble back (it tucks away when idle) |
+| Right-click him | **Settings** (see below) |
 
 ### Two ways to have him around
 
-| | **Free Tux** (default) | **Mini Tux** |
+| | **Free Tux** (default) | **Mini Tux** (lowest profile) |
 |---|---|---|
-| Size | Resizable | Tiny penguin, mostly speech bubble |
-| Moving | Drag anywhere | Drag him and he slides along the screen edges; his bubble opens toward the middle |
+| Size | Resizable | Tiny penguin (44 px) and a compact text box that grows to fit, then shrinks back |
+| Moving | Drag anywhere | Drag him and he slides along the screen edges |
 | Asking | Click his belly or just type | Click him or just type |
-| On top of other windows | Optional: right-click → *Keep me on top* | Always, on every workspace |
+| On top of other windows | Optional (Settings → *Keep on top*) | Always, on every workspace |
 
-Switch any time from the right-click options, or ask him to "stay on top". He remembers your
-choice and where you left him.
+### Settings (right-click Tux)
+
+Click a line to change it; it applies right away and is remembered (`~/.config/tux/settings.json`).
+
+| Setting | Choices |
+|---|---|
+| Mode | Free Tux / Mini Tux |
+| Bubble | right / left / above / below Tux (Mini Tux flips it if it would point off-screen) |
+| See-through | solid / a little / half / glass (text stays solid) |
+| Text size | small / normal / large |
+| Theme | light / dark |
+| Hide bubble after | 10 s / 20 s / 1 min / never |
+| Keep on top | on / off (Mini Tux is always on top) |
+
+Asking him to "stay on top" also offers the visible options. He remembers where you left him.
 
 Nothing extra to install: GNOME on Wayland doesn't let apps keep themselves on top, so Tux runs
 through XWayland (Ubuntu's built-in support for X11 apps), where that's allowed. To run him as a
