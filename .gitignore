@@ -1,6 +1,8 @@
-bin/
-models/
+/bin
+/models
 __pycache__/
 index.json
 versions/
 *.part
+.claude/
+knowledge/
