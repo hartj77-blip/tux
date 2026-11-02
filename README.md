@@ -73,6 +73,29 @@ plain Wayland app instead, set `TUX_WAYLAND=1`; he then can't stay on top or rid
   ("that", "it", "why…"). Lines that look like passwords or tokens are skipped.
   Nothing leaves your machine.
 
+## Offline Linux library
+
+`install.sh` builds a local, searchable library in `knowledge/` (SQLite full-text search, no
+network needed after setup):
+
+- **Full man pages** for every installed command, admin tool and config file (sections 1, 5, 8)
+- **tldr pages**: short real-world examples for ~5,000 commands (3 MB download)
+- **The Arch Wiki** (optional, English): deep guides on boot, audio, networking, systemd and
+  more (19 MB download, ~190 MB on disk). The installer asks first.
+- **Live `--help`** from the commands you actually have installed (destructive tools are never run)
+
+What Tux does with it:
+
+- **Instant tldr answers:** "curl download a file", "chown a folder recursively", "scp copy a
+  file to another computer"… When an example clearly matches your question, you get it
+  straight away, with no model involved.
+- **Source links** under answers: the matching Arch Wiki page (opens locally) or the
+  command's man page (opens in Help).
+- **▸ More *command* examples:** one click shows that command's tldr examples.
+
+Rebuild any time with `python3 knowledge.py build` (add `--arch` for the Arch Wiki). Search
+it yourself with `python3 knowledge.py search "rsync exclude"`.
+
 ## Extras
 
 - **Your own notes:** put `command : description` lines in `~/Helpful Linux Commands.txt`
@@ -92,4 +115,7 @@ plain Wayland app instead, set `TUX_WAYLAND=1`; he then can't stay on top or rid
 Tux the penguin artwork was created by Larry Ewing (lewing@isc.tamu.edu) using The GIMP.
 
 Code is MIT licensed (see `LICENSE`). The model (Qwen2.5-Coder, Apache-2.0) and
-llama.cpp (MIT) are downloaded from their own projects by `install.sh`.
+llama.cpp (MIT) are downloaded from their own projects by `install.sh`, as are the
+[tldr pages](https://github.com/tldr-pages/tldr) (CC BY 4.0, © the tldr-pages authors) and the
+[ArchWiki](https://wiki.archlinux.org) (GNU FDL 1.3, © ArchWiki contributors). None of them
+are included in this repository.
