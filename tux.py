@@ -176,6 +176,12 @@ QUICK = [
     (["battery"], "```bash\nupower -i $(upower -e | grep BAT)\n```"),
     (["gpu graphics video", "card driver which what"], "```bash\nlspci -k | grep -A3 -i vga\n```"),
     (["usb", "list device devices plugged"], "```bash\nlsusb\nlsblk -f\n```"),
+    (["driver drivers", "install get update missing nvidia graphics gpu wifi"],
+     "Let Ubuntu pick the right drivers (GPU, Wi-Fi):\n```bash\nsudo ubuntu-drivers install\n```\n"
+     "Or: Software & Updates → Additional Drivers."),
+    (["appimage"],
+     "Make it runnable, then run it:\n```bash\nchmod +x App.AppImage\n./App.AppImage\n```\n"
+     "Won't start? It may need FUSE: `sudo apt install libfuse2t64`"),
 ]
 
 
@@ -250,6 +256,158 @@ def perch_remove():
     if PERCH_UUID in exts:
         _set_enabled_extensions([e for e in exts if e != PERCH_UUID])
     shutil.rmtree(_perch_dir(), ignore_errors=True)
+
+
+# ---------------------------------------------------------------- install helper
+# "install X" / "remove X" / "is X installed": checked against this machine's real package
+# lists (apt, dpkg, snap), so the command Tux gives is one that will actually work here.
+INSTALL_RX = re.compile(r"\b(?P<verb>reinstall|uninstall|install|remove|purge|get rid of)\b"
+                        r"\s+(?P<rest>.+)", re.I)
+INSTALLED_RX = re.compile(r"\b(?:is|are)\s+(?P<rest>.+?)\s+installed\b|"
+                          r"\bdo i have\s+(?P<rest2>.+?)(?:\s+installed)?\s*\??$", re.I)
+NOT_PKG = {"updates", "update", "upgrades", "upgrade", "driver", "drivers", "deb", "appimage",
+           "file", "files", "folder", "directory", "it", "this", "that", "everything", "stuff",
+           "app", "apps", "program", "programs", "software", "package", "packages", "fonts",
+           "font", "theme", "themes", "extension", "extensions", "printer", "ubuntu", "linux"}
+# common names that don't match their package, or that are best from somewhere specific
+INSTALL_ALIASES = {
+    "vs code": ("snap", "code", "--classic"), "vscode": ("snap", "code", "--classic"),
+    "visual studio code": ("snap", "code", "--classic"),
+    "chrome": ("chrome",), "google chrome": ("chrome",),
+    "discord": ("snap", "discord"), "spotify": ("snap", "spotify"), "slack": ("snap", "slack"),
+    "zoom": ("snap", "zoom-client"), "telegram": ("snap", "telegram-desktop"),
+    "obs": ("apt", "obs-studio"), "obs studio": ("apt", "obs-studio"),
+    "docker": ("apt", "docker.io", "Use it without sudo: `sudo usermod -aG docker $USER`, "
+               "then log out and back in."),
+    "node": ("apt", "nodejs npm"), "nodejs": ("apt", "nodejs npm"), "node.js": ("apt", "nodejs npm"),
+    "npm": ("apt", "nodejs npm"), "steam": ("apt", "steam-installer"),
+    "java": ("apt", "default-jdk"), "jdk": ("apt", "default-jdk"),
+    "pip": ("apt", "python3-pip"), "pip3": ("apt", "python3-pip"), "python": ("apt", "python3"),
+    "office": ("apt", "libreoffice"),
+}
+CHROME_DEB = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
+
+
+def _run(cmd, timeout=3):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None, ""
+
+
+def install_target(q):
+    """('install'|'remove'|'check', name) if q is about installing something, else None."""
+    m = INSTALL_RX.search(q)
+    verb = None
+    if m:
+        verb = {"uninstall": "remove", "purge": "remove", "get rid of": "remove",
+                "reinstall": "install"}.get(m.group("verb").lower(), m.group("verb").lower())
+        rest = m.group("rest")
+    else:
+        m = INSTALLED_RX.search(q)
+        if not m:
+            return None
+        verb, rest = "check", m.group("rest") or m.group("rest2")
+    rest = re.split(r"\s+(?:on|in|for|from|to|with|using|via|please)\b|[?,!]", rest.lower())[0]
+    words_ = [w for w in rest.split() if w not in ("the", "a", "an", "my", "some")]
+    while words_ and words_[-1] in ("app", "application", "program", "software", "package"):
+        words_.pop()
+    name = " ".join(words_[:3]).strip(" .")
+    if not name or name.startswith(".") or "/" in name or \
+            any(w.strip(".") in NOT_PKG for w in name.split()):
+        return None
+    return verb, name
+
+
+def _installed(pkg):
+    code, out = _run(["dpkg-query", "-W", "-f=${Status}|${Version}", pkg])
+    if code == 0 and out.startswith("install ok installed"):
+        return "apt", out.split("|", 1)[1]
+    if shutil.which("snap"):
+        code, out = _run(["snap", "list", pkg])
+        if code == 0 and len(out.splitlines()) > 1:
+            return "snap", out.splitlines()[1].split()[1]
+    return None
+
+
+def nice_version(v):
+    """'1:2.53.0-1ubuntu1.1' -> '2.53.0', '1:1.0.0.85~ds' -> '1.0.0.85'."""
+    return re.split(r"[-~+]", v.split(":", 1)[-1])[0]
+
+
+def _apt_candidate(pkg):
+    code, out = _run(["apt-cache", "policy", pkg])
+    m = re.search(r"Candidate:\s*(\S+)", out)
+    return m.group(1) if m and m.group(1) != "(none)" else None
+
+
+def _snap_available(pkg):
+    """None if not in the Snap Store, else True/False for 'needs --classic'."""
+    if not shutil.which("snap"):
+        return None
+    code, out = _run(["snap", "info", pkg], timeout=4)
+    if code != 0:
+        return None
+    return bool(re.search(r"^\s*\S+/stable:.*\bclassic\b", out, re.M))
+
+
+def _apt_suggestions(name, n=3):
+    stem_ = re.escape(name.replace(" ", "-"))
+    code, out = _run(["apt-cache", "search", "--names-only", f"^{stem_}"])
+    hits = []
+    for line in out.splitlines():
+        pkg, _, desc = line.partition(" - ")
+        if re.search(r"(^lib|-dev$|-doc$|-dbg$|-data$|-common$)", pkg):
+            continue
+        hits.append((len(pkg), pkg, desc))
+    return [(p, d) for _, p, d in sorted(hits)[:n]]
+
+
+def install_answer(verb, name):
+    """A ready answer for this machine, or None to let the model handle it."""
+    alias = INSTALL_ALIASES.get(name)
+    if alias and alias[0] == "chrome":
+        if _installed("google-chrome-stable"):
+            return "Google Chrome is already installed. 👍"
+        return ("Chrome isn't in Ubuntu's software; get Google's .deb:\n"
+                f"```bash\nwget {CHROME_DEB}\nsudo apt install ./google-chrome-stable_current_amd64.deb\n```\n"
+                "It adds Google's repo, so it updates with the rest of your system.")
+    pkgs = alias[1].split() if alias else [name.replace(" ", "-")]
+    pkg = pkgs[0]
+    inst = _installed(pkg)
+    if verb == "remove":
+        if not inst:
+            return f"`{pkg}` isn't installed, so nothing to remove." if alias else None
+        src, ver = inst
+        if src == "snap":
+            return f"Remove the snap:\n```bash\nsudo snap remove {pkg}\n```"
+        return (f"Remove it:\n```bash\nsudo apt remove {pkg}\n```\n"
+                "Pro tip: `sudo apt autoremove` clears out what it pulled in.")
+    if inst:
+        src, ver = inst
+        return f"Already installed: `{pkg}` {nice_version(ver)} ({src}). 👍"
+    if verb == "check":
+        found = _apt_candidate(pkg) or (_snap_available(pkg) is not None)
+        return (f"`{pkg}` isn't installed" + (", but it's available: ask me to install it." if found
+                                                else ", and I can't find it in apt or snap."))
+    note = ("\n" + alias[2]) if alias and len(alias) > 2 and alias[0] == "apt" else ""
+    if alias and alias[0] == "snap":
+        classic = " --classic" if len(alias) > 2 else ""
+        return f"From the Snap Store:\n```bash\nsudo snap install {pkg}{classic}\n```"
+    ver = _apt_candidate(pkg)
+    if ver:
+        return (f"From Ubuntu's software (apt), version {nice_version(ver)}:\n"
+                f"```bash\nsudo apt install {' '.join(pkgs)}\n```" + note)
+    snap = _snap_available(pkg)
+    if snap is not None:
+        return f"From the Snap Store:\n```bash\nsudo snap install {pkg}{' --classic' if snap else ''}\n```"
+    sugg = _apt_suggestions(name)
+    if sugg:
+        lines = "\n".join(f"• `{p}` → {d}" for p, d in sugg)
+        return (f"No package called \"{name}\". Closest matches:\n{lines}\n"
+                f"```bash\nsudo apt install {sugg[0][0]}\n```")
+    return None
 
 # design space: everything is laid out in a 320 x 430 box and scaled
 DW, DH = 320.0, 430.0
@@ -351,13 +509,14 @@ SYNONYMS = {
     "brightness": "brightness", "frozen": "freeze respond", "hung": "freeze respond",
     "deb": "package install", "lag": "slow performance",
     "bunch": "multiple", "many": "multiple", "several": "multiple", "batch": "multiple",
+    "bigger": "size large", "smaller": "size small", "larger": "size large",
     "zip": "archive compress zip", "unzip": "extract archive unzip", "battery": "battery power",
     "password": "password", "user": "user account", "sudo": "administrator root sudo",
 }
 
 
 def stem(w):
-    for suf in ("ing", "ed", "es", "s"):
+    for suf in ("ing", "ed", "s"):  # (no "es": it turned "updates" into "updat")
         if len(w) > 4 and w.endswith(suf):
             return w[: -len(suf)]
     return w
@@ -422,7 +581,8 @@ class Knowledge:
             if s > hs:
                 best_help, hs = p, s
         # names a real command (find, tar…)? then it's a terminal question: Help must be very sure
-        names_cmd = any(name.lower() in raw for _, name, _ in mans)
+        names_cmd = any(name.lower() in raw and name.lower() not in STOP  # "make", "get"…
+                        for _, name, _ in mans)
         if hs < (HELP_MIN_SCORE * 2 if names_cmd else HELP_MIN_SCORE):
             best_help = None
         note, ns = None, 0
@@ -1068,6 +1228,12 @@ class Tux(Gtk.ApplicationWindow):
         if PERCH_WORDS.search(q) and not clip:  # "stay on top" / "sit on my dock"
             self.perch_offer()
             return
+        target = None if clip else install_target(q)
+        if target:  # install / remove / "is X installed": check this machine's real packages
+            self.say("checking apt & snap…")
+            threading.Thread(target=self.install_flow, args=(q, self.gen) + target,
+                             daemon=True).start()
+            return
         if TIP_WORDS.search(q) and not clip:  # tips come from the curated list, instantly, no model
             self.say("Power moves:\n" + self.kb.tip(3))
             return
@@ -1088,6 +1254,23 @@ class Tux(Gtk.ApplicationWindow):
         self.say(pre + (f"From your notes:\n`{note[0]}`\n\nthinking…" if note else "thinking…"))
         threading.Thread(target=self.ask, args=(q, self.gen, hp, mans, note, clip, recent),
                          daemon=True).start()
+
+    def install_flow(self, q, gen, verb, name):
+        """Worker thread: answer from apt/snap if we can, otherwise ask the model."""
+        try:
+            ans = install_answer(verb, name)
+        except Exception:
+            ans = None
+        if ans:
+            if gen == self.gen:
+                GLib.idle_add(self.say, ans)
+            return
+        hp, mans, note = self.kb.search(q)
+        self.help_uri = hp["uri"] if hp else None
+        # tell the model what we already know, so it doesn't invent an apt command
+        known = (f"\n(I checked this computer: there's no package called '{name}' in apt or the "
+                 "Snap Store. Suggest where to get it, e.g. the vendor's site, a .deb, or Flatpak.)")
+        self.ask(q + known, gen, hp, mans, note)
 
     def ask(self, q, gen, hp, mans, note, clip=None, recent=None):
         def status(msg):
