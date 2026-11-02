@@ -44,6 +44,17 @@ fi
 say "Indexing GNOME Help and man pages…"
 python3 setup_tux.py
 
+# 4b. offline Linux library: full man pages + tldr examples, and optionally the Arch Wiki
+arch=""
+if [ -d knowledge/arch ]; then
+    arch="--arch"   # already have it: keep it fresh
+elif [ -t 0 ]; then
+    read -rp "Add the Arch Wiki to Tux's offline library (19 MB download, ~190 MB on disk)? [y/N] " yn
+    [[ "$yn" =~ ^[Yy] ]] && arch="--arch"
+fi
+say "Building Tux's offline library (man pages, tldr${arch:+, Arch Wiki})…"
+nice -n 15 python3 knowledge.py build $arch || echo "  (library build failed; Tux still works without it)"
+
 # 5. app grid entry
 apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$apps"
@@ -61,3 +72,4 @@ if [ -t 0 ] && ! grep -qF "$MARK" ~/.bashrc 2>/dev/null; then
 fi
 
 say "Done! Open Tux from your app grid, or run:  python3 $TUX_DIR/tux.py"
+echo "   Want him tiny on the screen edge, or kept on top? Right-click Tux → options."
