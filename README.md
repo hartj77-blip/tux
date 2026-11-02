@@ -16,7 +16,7 @@ cd ~/tux && ./install.sh
 That's it. Open **Tux** from your app grid. The installer needs no sudo. It
 downloads llama.cpp (~25 MB) and a small model (~1 GB), then takes a few minutes.
 
-**Needs:** x86_64 Linux, `curl`, and Python 3 with GTK4. Stock Ubuntu 24.04+ with GNOME
+**Needs:** x86_64 Linux, `curl`, and Python 3 with GTK4. Stock Ubuntu 22.04+ or Debian 12+ with GNOME
 already has everything. Otherwise:
 
 ```bash

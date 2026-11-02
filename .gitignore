@@ -4,3 +4,4 @@ __pycache__/
 index.json
 versions/
 *.part
+.claude/
