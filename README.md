@@ -32,6 +32,16 @@ sudo apt install python3-pil   # only if you want to use your own Tux picture
 package manager (apt, dnf, pacman or zypper). It also test-runs llama.cpp before the big
 model download, so an older system finds out right away instead of after "Done!".
 
+## Uninstall
+
+```bash
+~/tux/uninstall.sh
+```
+
+It closes Tux and removes his app grid entry, his settings and his `~/.bashrc` line (if you
+added it), then asks before deleting the `~/tux` folder with the model. No sudo needed. The
+system packages from the install step stay, since other apps use them too.
+
 ## Using Tux
 
 | Do this | What happens |
