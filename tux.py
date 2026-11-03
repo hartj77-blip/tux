@@ -1061,7 +1061,8 @@ class Tux(Gtk.ApplicationWindow):
         self.history = []
         self.bubble_text = ""          # greeting is set once the mode is known
         self.help_uri = None
-        self.clip = None             # clipboard text attached to the next question
+        self.has_yelp = bool(shutil.which("yelp"))  # no Help app: 📖 links show a summary instead
+        self.clip = None           # clipboard text attached to the next question
         self.clip_seen = None        # last clipboard text we looked at
         self.clip_primed = False     # startup clipboard is old news, not a question
         self.actions = {}            # "▸ label" lines in the bubble -> what clicking does
@@ -1460,10 +1461,7 @@ class Tux(Gtk.ApplicationWindow):
                     if fn:
                         fn()
                 elif payload:
-                    # Help pages + man pages open in Help; Arch Wiki pages in the browser
-                    opener = "xdg-open" if payload.startswith("file://") else "yelp"
-                    subprocess.Popen([opener, payload], start_new_session=True, env=clean_env(),
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self.open_help(payload)
                 return
         b = self.L.BUBBLE
         if self.bubble_on() and b[0] <= dx <= b[0] + b[2] and b[1] <= dy <= b[1] + b[3]:
@@ -1870,6 +1868,55 @@ class Tux(Gtk.ApplicationWindow):
                       self.toggle_on_top(True))),
             ("Not now", lambda: self.say("No problem. Right-click me any time.")),
         ])
+
+    # ---- 📖 links: open in Help (yelp) if it's there, else show the gist in the bubble
+    def open_help(self, uri):
+        if not uri.startswith("file://") and not self.has_yelp:
+            self.has_yelp = bool(shutil.which("yelp"))  # maybe installed since startup
+            if not self.has_yelp:
+                self.help_summary(uri)
+                return
+        opener = "xdg-open" if uri.startswith("file://") else "yelp"  # Arch Wiki → browser
+        try:
+            subprocess.Popen([opener, uri], start_new_session=True, env=clean_env(),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            self.say(f"Couldn't open that page ({opener} is missing).")
+
+    def help_summary(self, uri):
+        prev_text, prev_actions = self.bubble_text, dict(self.actions)
+        if uri.startswith("man:"):
+            name = uri[4:].split("(")[0]
+            desc = next((d for n, d, _ in self.kb.man if n == name), "")
+            text = f"{name}: {desc}\nRead the full page in a terminal:\n`man {name}`"
+        else:
+            p = next((p for p in self.kb.help if p["uri"] == uri), None)
+            if not p:
+                text = "I can't find that Help page anymore."
+            else:
+                lines = [p["title"]] + ([p["desc"]] if p["desc"] else [])
+                if p["steps"]:
+                    lines += [f"{i}. {s}" for i, s in enumerate(p["steps"], 1)]
+                elif p["text"]:
+                    lines.append(p["text"])
+                text = "\n".join(lines)
+
+        def back():
+            self.actions = prev_actions
+            self.say(prev_text)
+        self.say_actions(text, [("Get the Help app for full pages", self.yelp_install_info),
+                                ("Back", back)])
+
+    def yelp_install_info(self):
+        """Tux never runs anything: give the command for this machine's package manager."""
+        for tool, cmd in (("apt", "sudo apt install yelp"), ("dnf", "sudo dnf install yelp"),
+                          ("pacman", "sudo pacman -S yelp"), ("zypper", "sudo zypper install yelp")):
+            if shutil.which(tool):
+                self.say(f"Install GNOME Help (click to copy):\n`{cmd}`\n"
+                         "Then click a 📖 link again. No restart needed.")
+                return
+        self.say("Install the package called yelp (GNOME Help) with your package manager, "
+                 "then click a 📖 link again.")
 
     def say(self, text):
         if bool(text) != bool(self.bubble_text):
