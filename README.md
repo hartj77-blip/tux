@@ -5,8 +5,7 @@ speech bubble. Ask him anything about Linux and he answers in a line or two with
 the exact command, right on your machine. No cloud, no account.
 
 His brain is a small AI model that runs on your own CPU: **Qwen2.5-Coder 1.5B**, run by
-**llama.cpp**. Many common questions don't even need it: hand-checked answers, your
-installed packages and tldr examples answer those instantly.
+**llama.cpp**. 
 
 ![Tux answering a question](tux-art.png)
 
