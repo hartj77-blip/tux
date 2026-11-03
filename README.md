@@ -66,6 +66,7 @@ Click a line to change it; it applies right away and is remembered (`~/.config/t
 | Theme | light / dark |
 | Hide bubble after | 10 s / 20 s / 1 min / never |
 | Keep on top | on / off (Mini Tux is always on top) |
+| Arch Wiki | off (default) / on: optional offline add-on, downloaded on request; can be deleted again |
 
 Asking him to "stay on top" also offers the visible options. He remembers where you left him.
 
@@ -93,21 +94,21 @@ network needed after setup):
 
 - **Full man pages** for every installed command, admin tool and config file (sections 1, 5, 8)
 - **tldr pages**: short real-world examples for ~5,000 commands (3 MB download)
-- **The Arch Wiki** (optional, English): deep guides on boot, audio, networking, systemd and
-  more (19 MB download, ~190 MB on disk). The installer asks first.
 - **Live `--help`** from the commands you actually have installed (destructive tools are never run)
+- **The Arch Wiki** (optional add-on, off by default): deep guides on boot, audio, networking,
+  systemd and more. Turn it on in Settings → More settings → *Arch Wiki*; Tux downloads it in the
+  background (19 MB, ~130 MB on disk). The same setting switches it off or deletes it.
 
 What Tux does with it:
 
 - **Instant tldr answers:** "curl download a file", "chown a folder recursively", "scp copy a
   file to another computer"… When an example clearly matches your question, you get it
   straight away, with no model involved.
-- **Source links** under answers: the matching Arch Wiki page (opens locally) or the
-  command's man page (opens in Help).
-- **▸ More *command* examples:** one click shows that command's tldr examples.
+- **A source link** under answers when there's a good one: the matching GNOME Help page, or the
+  Arch Wiki page if you've turned it on.
 
-Rebuild any time with `python3 knowledge.py build` (add `--arch` for the Arch Wiki). Search
-it yourself with `python3 knowledge.py search "rsync exclude"`.
+Rebuild any time with `python3 knowledge.py build`. Search it yourself with
+`python3 knowledge.py search "rsync exclude"`.
 
 ## Extras
 

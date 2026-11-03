@@ -3,6 +3,7 @@
 in one SQLite full-text index (knowledge/knowledge.db). Everything stays on this machine.
 
 Build:  python3 knowledge.py build [--arch]     (downloads tldr, and the Arch Wiki with --arch)
+Wiki:   python3 knowledge.py add-arch / remove-arch   (the optional offline Arch Wiki)
 Search: python3 knowledge.py search "rsync exclude folder"
 """
 import gzip
@@ -402,9 +403,15 @@ def build(with_arch=False, fetch=True):
 
 
 # ---------------------------------------------------------------- search (used by tux.py)
+def have_arch():
+    """Is the optional offline Arch Wiki downloaded?"""
+    return os.path.isdir(os.path.join(ARCH_DIR, "en"))
+
+
 class Library:
-    def __init__(self, path=DB):
+    def __init__(self, path=DB, use_arch=False):
         self.con = None
+        self.use_arch = use_arch and have_arch()   # optional add-on, off unless you turn it on
         if os.path.exists(path):
             self.con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
 
@@ -422,9 +429,10 @@ class Library:
         q = self._match(terms)
         rows, seen = [], set()
         cols = "source, title, heading, body, ref, bm25(docs, 6.0, 3.0, 1.0) AS score"
-        sql = f"SELECT {cols} FROM docs WHERE docs MATCH ? ORDER BY score LIMIT ?"
+        skip = "" if self.use_arch else " AND source != 'arch'"   # Arch Wiki is opt-in
+        sql = f"SELECT {cols} FROM docs WHERE docs MATCH ?{skip} ORDER BY score LIMIT ?"
         # exact command name ("tar", not "git-get-tar-commit-id")
-        sql_cmd = f"SELECT {cols} FROM docs WHERE docs MATCH ? AND title = ? ORDER BY score LIMIT ?"
+        sql_cmd = f"SELECT {cols} FROM docs WHERE docs MATCH ? AND title = ?{skip} ORDER BY score LIMIT ?"
         try:
             if command:
                 # its tldr examples first, then the man page parts that match the question
@@ -479,10 +487,16 @@ def best_window(text, terms, size=360):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "build":
         build(with_arch="--arch" in sys.argv, fetch="--offline" not in sys.argv)
+    elif len(sys.argv) > 1 and sys.argv[1] == "add-arch":      # optional add-on: get it
+        build(with_arch=True, fetch=False)
+        sys.exit(0 if have_arch() else 1)
+    elif len(sys.argv) > 1 and sys.argv[1] == "remove-arch":   # ...or delete it (~130 MB)
+        shutil.rmtree(ARCH_DIR, ignore_errors=True)
+        build(with_arch=False, fetch=False)
     elif len(sys.argv) > 2 and sys.argv[1] == "search":
         words_ = sys.argv[2].split()
         cmd = sys.argv[3] if len(sys.argv) > 3 else None
-        for r in Library().search(words_, cmd):
+        for r in Library(use_arch=True).search(words_, cmd):
             print(f"[{r['source']}] {r['title']} › {r['heading']}  ({r['score']:.1f})  {r['ref']}")
             print("   ", best_window(r["body"], words_)[:300])
     else:
