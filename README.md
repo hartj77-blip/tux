@@ -4,6 +4,10 @@ A tiny, fully local Linux helper. Tux is a penguin-shaped desktop window with a
 speech bubble. Ask him anything about Linux and he answers in a line or two with
 the exact command, right on your machine. No cloud, no account.
 
+His brain is a small AI model that runs on your own CPU: **Qwen2.5-Coder 1.5B**, run by
+**llama.cpp**. Many common questions don't even need it: hand-checked answers, your
+installed packages and tldr examples answer those instantly.
+
 ![Tux answering a question](tux-art.png)
 
 ## Install
@@ -14,7 +18,7 @@ cd ~/tux && ./install.sh
 ```
 
 That's it. Open **Tux** from your app grid. The installer needs no sudo. It
-downloads llama.cpp (~25 MB) and a small model (~1 GB), then takes a few minutes.
+downloads llama.cpp (~25 MB) and the Qwen2.5-Coder 1.5B model (~1 GB), then takes a few minutes.
 
 **Needs:** x86_64 Linux, `curl`, and Python 3 with GTK4. Stock Ubuntu 22.04+ or Debian 12+ with GNOME
 already has everything. Otherwise:
@@ -73,6 +77,29 @@ Asking him to "stay on top" also offers the visible options. He remembers where 
 Nothing extra to install: GNOME on Wayland doesn't let apps keep themselves on top, so Tux runs
 through XWayland (Ubuntu's built-in support for X11 apps), where that's allowed. To run him as a
 plain Wayland app instead, set `TUX_WAYLAND=1`; he then can't stay on top or ride the edges.
+
+## The brain: a local AI model
+
+| | |
+|---|---|
+| Model | [Qwen2.5-Coder-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF) by the Qwen team, Apache-2.0 |
+| File | `models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf` (4-bit Q4_K_M, ~1 GB) |
+| Runs on | [llama.cpp](https://github.com/ggml-org/llama.cpp) CPU build (`llama-server`), listening on `127.0.0.1` only; no GPU needed |
+| Speed* | ~24 tokens/s (~18 words/s) on 3 CPU threads; loads in ~1 s; most answers in 1–2 s |
+| Memory* | ~1.2 GB while loaded; unloaded after 5 minutes idle (Tux itself ~70 MB) |
+| Privacy | Everything runs on your machine; no account, no API key, nothing sent anywhere |
+
+\* Measured on an 8th-gen Intel laptop CPU (8 threads, 30 GB RAM, no GPU used).
+
+Not every answer uses the model. These skip it and answer instantly:
+- hand-checked answers for common tasks;
+- the install helper, which checks your real apt/snap packages;
+- tldr examples that clearly match;
+- your own notes.
+
+**Swap the model:** point `MODEL` at the top of `tux.py` to any GGUF chat model in `models/`.
+For example, Qwen2.5 0.5B uses less RAM but gives weaker answers; a 3B model gives better
+answers but runs about half as fast and needs about 2 GB of RAM.
 
 ## How it stays fast and light
 
