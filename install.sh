@@ -44,14 +44,10 @@ fi
 say "Indexing GNOME Help and man pages…"
 python3 setup_tux.py
 
-# 4b. offline Linux library: full man pages + tldr examples, and optionally the Arch Wiki
+# 4b. offline Linux library: full man pages + tldr examples. The Arch Wiki is an optional
+#     add-on (Tux: right-click → Settings → More settings → Arch Wiki); kept fresh if you have it.
 arch=""
-if [ -d knowledge/arch ]; then
-    arch="--arch"   # already have it: keep it fresh
-elif [ -t 0 ]; then
-    read -rp "Add the Arch Wiki to Tux's offline library (19 MB download, ~190 MB on disk)? [y/N] " yn
-    [[ "$yn" =~ ^[Yy] ]] && arch="--arch"
-fi
+[ -d knowledge/arch ] && arch="--arch"
 say "Building Tux's offline library (man pages, tldr${arch:+, Arch Wiki})…"
 nice -n 15 python3 knowledge.py build $arch || echo "  (library build failed; Tux still works without it)"
 

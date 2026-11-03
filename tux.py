@@ -15,6 +15,7 @@ import os
 import random
 import re
 import shutil
+import sys
 import signal
 import subprocess
 import threading
@@ -25,7 +26,7 @@ import warnings
 import cairo
 import gi
 
-from knowledge import Library, best_window  # Tux's offline Linux library
+from knowledge import Library, best_window, have_arch  # Tux's offline Linux library
 
 # software rendering: ~half the RAM of GTK's GL renderer and leaves the GPU alone
 os.environ.setdefault("GSK_RENDERER", "cairo")
@@ -70,8 +71,7 @@ SYSTEM_PROMPT = (
     "systemd, NetworkManager). Everything about using the computer counts: terminal, "
     "desktop, settings, wifi, hardware, apps. Answer in ONE short line, then a ```bash "
     "block if a command helps. For desktop settings, give the Settings path in that line. "
-    "At most one 'Pro tip:' line. Never pad. Use the Reference if relevant; ArchWiki "
-    "snippets are for Arch Linux, so turn pacman into apt (package names can differ). Warn on "
+    "At most one 'Pro tip:' line. Never pad. Use the Reference if relevant. Warn on "
     "destructive commands. If Clipboard or Recent commands are given, that's what the "
     "user means by this/that/it (the last command is the likeliest), and never refuse "
     "then. Only for clearly non-computer topics (sports, jokes, poems) "
@@ -904,25 +904,6 @@ def _tidy_tldr(desc, cmd, asked=()):
     return desc, cmd
 
 
-def tldr_examples_text(lib, command, n=3):
-    """The first few examples from a command's tldr page, ready for the bubble."""
-    if not lib or not command:
-        return None
-    for r in lib.search([command], command, limit=3):
-        if r["source"] == "tldr" and r["title"] == command:
-            parts = []
-            for line in r["body"].splitlines():
-                m = re.match(r"- (.*?):\s*`(.*)`\s*$", line)
-                if m:
-                    desc, cmd = _tidy_tldr(m.group(1), m.group(2))
-                    parts.append(f"{desc}:\n```bash\n{cmd}\n```")
-                if len(parts) == n:
-                    break
-            if parts:
-                return "\n".join(parts) + f"\n📖 man {command} ›"
-    return None
-
-
 def tldr_answer(lib, man_names, q):
     """An instant answer from tldr when one example clearly matches the question."""
     if not lib:
@@ -939,7 +920,12 @@ def tldr_answer(lib, man_names, q):
     if not m:
         return None
     desc, cmd = _tidy_tldr(m.group(1), m.group(2), other)
-    return f"{desc}:\n```bash\n{cmd}\n```\n📖 man {command} ›"
+    desc = re.sub(r"\s*\([^)]*\)", "", desc)              # drop "(i.e. …)" asides
+    if len(desc) > 55 and "," in desc:   # keep the first clause: "List the sizes of …"
+        desc = desc.split(",", 1)[0]
+    if len(desc) > 70:
+        desc = desc[:70].rsplit(" ", 1)[0].rstrip(",;") + "…"
+    return f"{desc}:\n```bash\n{cmd}\n```"
 
 
 def library_refs(lib, man_names, q):
@@ -1066,6 +1052,7 @@ class Tux(Gtk.ApplicationWindow):
         self.L = FREE
         self.mini_drag = None             # Mini Tux being dragged along the edges
         self.anchored = None              # window size Mini Tux was last put on his edge at
+        self.wiki_job = None              # "downloading the Arch Wiki"… while that runs
         self.placed_once = False
         self.brain = Brain()
         self.kb = Knowledge()
@@ -1155,12 +1142,12 @@ class Tux(Gtk.ApplicationWindow):
             self.get_surface().set_user_time(0)
         self.apply_mode()
         self.apply_theme()
+        self.kb.lib.use_arch = self.opt("arch_wiki") and have_arch()  # opt-in add-on
         self.bubble_text = self.greeting()
         self.fit_mini(force=True)
 
     def greeting(self):
-        how = "click me" if self.L.mode == "mini" else "click my belly"
-        return f"{self.kb.tip()}\n\nAsk me anything: {how} or just type. Right-click me for settings."
+        return f"{self.kb.tip()}\nAsk me anything. Right-click for settings."
 
     # ---- geometry
     def geom(self):
@@ -1552,7 +1539,7 @@ class Tux(Gtk.ApplicationWindow):
 
     # ---- settings (right-click) values, with defaults
     DEFAULTS = {"mode": "free", "bubble_side": "right", "opacity": 0.97, "text_size": 1.0,
-                "theme": "light", "hide_secs": HIDE_SECS, "on_top": False}
+                "theme": "light", "hide_secs": HIDE_SECS, "on_top": False, "arch_wiki": False}
 
     def opt(self, key):
         return self.settings.get(key, self.DEFAULTS[key])
@@ -1787,7 +1774,7 @@ class Tux(Gtk.ApplicationWindow):
                 (f"Keep on top: {on_top}",
                  (lambda: self.show_settings(2)) if mini else
                  (lambda: (self.toggle_on_top(), self.show_settings(2)))),
-                ("Tuck my bubble away", self.tuck_bubble),
+                (f"Arch Wiki: {self.wiki_state()}", self.wiki_offer),
                 ("‹ Back", lambda: self.show_settings(1)),
             ]
         note = "" if self.x11 else " (on-top & edges need XWayland)"
@@ -1801,9 +1788,70 @@ class Tux(Gtk.ApplicationWindow):
         self.region_key = None
         self.area.queue_draw()
 
-    def show_examples(self, text, command):
-        self.help_uri = f"man:{command}"
-        self.say(text)
+    # ---- the optional offline Arch Wiki (download / switch on / off / delete)
+    def wiki_state(self):
+        if self.wiki_job:
+            return self.wiki_job
+        if self.opt("arch_wiki") and have_arch():
+            return "on"
+        return "off (downloaded)" if have_arch() else "off"
+
+    def wiki_offer(self):
+        if self.wiki_job:
+            self.say(f"Still {self.wiki_job}. Keep using me; I'll say when it's done.")
+        elif self.opt("arch_wiki") and have_arch():
+            self.say_actions("The offline Arch Wiki is on.", [
+                ("Turn it off (keep the files)", lambda: self.set_wiki(False)),
+                ("Turn it off and delete it (frees ~130 MB)",
+                 lambda: self.wiki_job_run(["remove-arch"], "deleting the Arch Wiki", False)),
+                ("‹ Back", lambda: self.show_settings(2))])
+        elif have_arch():
+            self.set_wiki(True)  # already downloaded: switch it on instantly
+        else:
+            self.say_actions(
+                "Add the Arch Wiki to my offline library? Deep guides on boot, audio, networking "
+                "and more. 19 MB download, ~130 MB on disk.", [
+                    ("Download it (in the background)",
+                     lambda: self.wiki_job_run(["add-arch"], "downloading the Arch Wiki", True)),
+                    ("Not now", lambda: self.show_settings(2))])
+
+    def set_wiki(self, on):
+        self.settings["arch_wiki"] = on
+        save_settings(self.settings)
+        self.kb.lib.use_arch = on and have_arch()
+        self.show_settings(2)
+
+    def wiki_job_run(self, args, what, enable):
+        """Download+add or delete the wiki at low priority, then reopen the rebuilt library."""
+        self.wiki_job = what
+        self.say(f"Okay, {what}… Keep using me; I'll say when it's done.")
+        cmd = ["nice", "-n", "15", sys.executable, os.path.join(HERE, "knowledge.py")] + args
+        if shutil.which("ionice"):
+            cmd = ["ionice", "-c3"] + cmd
+
+        def work():
+            try:
+                ok = subprocess.run(cmd, capture_output=True, timeout=1800, env=clean_env(),
+                                    stdin=subprocess.DEVNULL).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            GLib.idle_add(finish, ok)
+
+        def finish(ok):
+            self.wiki_job = None
+            if ok:
+                self.settings["arch_wiki"] = enable
+                save_settings(self.settings)
+            self.kb.lib = Library(use_arch=self.opt("arch_wiki"))  # the index was rebuilt
+            if not ok:
+                self.say("That didn't work (no internet?). Try again from Settings later.")
+            elif enable:
+                self.say("Arch Wiki added ✓ It's in my offline library now.")
+            else:
+                self.say("Arch Wiki deleted ✓ (freed ~130 MB).")
+            return False
+
+        threading.Thread(target=work, daemon=True).start()
 
     def tuck_bubble(self):
         self.last_activity = 0
@@ -1869,7 +1917,6 @@ class Tux(Gtk.ApplicationWindow):
             return
         tl = None if (clip or refers) else tldr_answer(self.kb.lib, self.kb.man_names, q)
         if tl:  # a tldr example that clearly matches: instant, and checked by the tldr project
-            self.help_uri = "man:" + tl.rsplit("man ", 1)[1].rstrip(" ›")
             self.say(tl)
             return
         # instant answer from your notes while the model thinks
@@ -1921,7 +1968,7 @@ class Tux(Gtk.ApplicationWindow):
                                      {"Content-Type": "application/json"})
         out = ""
         footer = f"\n📖 {hp['title']} ›" if hp else ""
-        if not hp and link:  # Arch Wiki section (opens locally) or the man page (in Help)
+        if not hp and link and link[1].startswith("file://"):  # Arch Wiki page (if it's on)
             footer, self.help_uri = f"\n📖 {link[0]} ›", link[1]
         self.brain.req_lock.acquire()
         try:
@@ -1955,17 +2002,7 @@ class Tux(Gtk.ApplicationWindow):
             # the model can't see command output; be straight about it instead of refusing
             out = (f"Last command: `{recent[-1]}`\nI can't see its output. "
                    "Copy the error and click me for an exact fix.")
-        if "only know Linux" in out:
-            status(out)
-        else:
-            command = question_terms(q, self.kb.man_names)[0]
-            more = tldr_examples_text(self.kb.lib, command) if command else None
-            if more and gen == self.gen:  # offer the command's real tldr examples
-                label = f"More {command} examples"
-                GLib.idle_add(self.say_actions, out + footer,
-                              [(label, lambda t=more, c=command: self.show_examples(t, c))])
-            else:
-                status(out + footer)
+        status(out if "only know Linux" in out else out + footer)
         self.history.append((q, out))
         self.history = self.history[-HISTORY_TURNS:]
         GLib.idle_add(self.arm_idle_timer, gen)
