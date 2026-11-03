@@ -40,7 +40,7 @@ sudo apt install python3-pil   # only if you want to use your own Tux picture
 | Ask "why did that fail?" | He looks at your last few terminal commands |
 | Ask "install obs studio", "remove htop", "do I have git?" | Checked against your real apt/snap packages: the exact command that works on your machine, "already installed", or the closest matches |
 | Ask for "tips" or "tricks" | Instant power-user moves |
-| Click the 📖 link | Opens the matching GNOME Help page |
+| Click the 📖 link | Opens the matching GNOME Help page (no Help app installed? He shows the gist in the bubble and the command to install it) |
 | Drag him | Move |
 | Drag the lines on his right foot / `Ctrl+scroll` | Resize |
 | Yellow / red button on his head | Minimize / close |
