@@ -27,7 +27,10 @@ sudo apt install python3-gi gir1.2-gtk-4.0 python3-cairo
 sudo apt install python3-pil   # only if you want to use your own Tux picture
 ```
 
-`install.sh` checks for these and tells you if anything's missing.
+`install.sh` checks everything first and lists what's missing in one go, split into
+**Required** and **Optional** (with what each adds), plus the install command for your
+package manager (apt, dnf, pacman or zypper). It also test-runs llama.cpp before the big
+model download, so an older system finds out right away instead of after "Done!".
 
 ## Using Tux
 
