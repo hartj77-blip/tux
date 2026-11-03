@@ -15,20 +15,20 @@ command -v python3 >/dev/null || { echo "Tux needs Python 3. Install python3 wit
 
 # package names differ per distro: gtk, curl, yelp, pillow, man
 if   command -v apt-get >/dev/null; then pm="sudo apt install"
-    p_gtk="python3-gi gir1.2-gtk-4.0 python3-cairo"; p_curl=curl; p_yelp=yelp; p_pil=python3-pil; p_man=man-db
+    p_gtk="python3-gi gir1.2-gtk-4.0 python3-cairo python3-gi-cairo"; p_curl=curl; p_yelp=yelp; p_pil=python3-pil; p_man=man-db
 elif command -v dnf >/dev/null; then pm="sudo dnf install"
     p_gtk="python3-gobject gtk4 python3-cairo"; p_curl=curl; p_yelp=yelp; p_pil=python3-pillow; p_man=man-db
 elif command -v pacman >/dev/null; then pm="sudo pacman -S --needed"
     p_gtk="python-gobject gtk4 python-cairo"; p_curl=curl; p_yelp=yelp; p_pil=python-pillow; p_man=man-db
 elif command -v zypper >/dev/null; then pm="sudo zypper install"
-    p_gtk="python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-4_0 python3-pycairo"; p_curl=curl
+    p_gtk="python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-4_0 python3-pycairo python3-gobject-cairo"; p_curl=curl
     p_yelp=yelp; p_pil=python3-Pillow; p_man=man
 else pm=""
     p_gtk="PyGObject + GTK 4 + pycairo for Python 3"; p_curl=curl; p_yelp=yelp; p_pil=Pillow; p_man=man-db
 fi
 
 need=() need_pkgs=() opt=() opt_pkgs=()
-python3 -c "import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk; import cairo" 2>/dev/null ||
+python3 -c "import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk; import cairo; gi.require_foreign('cairo')" 2>/dev/null ||
     { need+=("GTK 4 for Python: Tux's window"); need_pkgs+=($p_gtk); }
 command -v curl >/dev/null || { need+=("curl: downloads Tux's brain"); need_pkgs+=($p_curl); }
 command -v yelp >/dev/null || { opt+=("yelp (GNOME Help): opens full Help pages from 📖 links; without it Tux shows a summary"); opt_pkgs+=($p_yelp); }

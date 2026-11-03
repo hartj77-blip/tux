@@ -23,7 +23,7 @@ downloads llama.cpp (~25 MB) and the Qwen2.5-Coder 1.5B model (~1 GB), then take
 already has everything. Otherwise:
 
 ```bash
-sudo apt install python3-gi gir1.2-gtk-4.0 python3-cairo
+sudo apt install python3-gi gir1.2-gtk-4.0 python3-cairo python3-gi-cairo
 sudo apt install python3-pil   # only if you want to use your own Tux picture
 ```
 
