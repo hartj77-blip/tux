@@ -1606,6 +1606,10 @@ class Tux(Gtk.ApplicationWindow):
         if time.monotonic() - self.last_activity < secs:
             return True
         self.bubble_hidden = True
+        if self.in_bar() and not self.entry.get_text() and self.get_visible():
+            self.tick_src = None
+            self.put_away()           # back up into the top bar
+            return False
         if not self.entry.get_text():
             self.entry.set_visible(False)
         self.fit_bubble()
@@ -1690,6 +1694,10 @@ class Tux(Gtk.ApplicationWindow):
         if not d:
             return
         if d["moved"]:
+            if self.settings.get("in_bar") and self.settings.get("edge") != "top":
+                self.settings["in_bar"] = False
+                self.say("Out of the top bar: I'll stay on this edge now. "
+                         "Settings → Mode puts me back up there.")
             save_settings(self.settings)
         else:
             self.show_entry()  # just a click on Mini Tux: ask him something
@@ -1892,10 +1900,21 @@ class Tux(Gtk.ApplicationWindow):
 
     def set_mode(self, mode):
         self.remember_free_spot()
+        self.settings["in_bar"] = mode == "bar"
+        if mode == "bar":
+            mode = "mini"
+            self.drop_from_bar()
         self.settings["mode"] = mode
         save_settings(self.settings)
         self.apply_mode()
-        if mode == "mini":
+        if self.in_bar():
+            self.say("Mini Tux in the top bar! I live in my icon up there: click it (or press "
+                     "the shortcut) and I drop down to help, then pop back up when you're done.")
+        elif self.settings["in_bar"]:
+            self.say("Mini Tux in the top bar needs a desktop that shows tray icons. "
+                     "Ubuntu does; on plain GNOME add the AppIndicator extension. "
+                     "Until then I'm Mini Tux on the screen edge.")
+        elif mode == "mini":
             self.say("Mini Tux! I stay on top, on every workspace. Drag me along any screen edge; "
                      "click me to ask. Right-click for settings.")
         else:
@@ -1972,6 +1991,8 @@ class Tux(Gtk.ApplicationWindow):
     def summon(self):
         """Up front, bubble showing, text box open and ready to type."""
         if not self.get_visible():
+            if self.in_bar() and self.settings.get("edge") != "top":
+                self.drop_from_bar()
             self.set_visible(True)
         self.present()
         if self.x11:  # once he's on screen, make sure he gets the keyboard
@@ -1997,18 +2018,37 @@ class Tux(Gtk.ApplicationWindow):
         else:
             self.minimize()
 
-    def tray_click(self):
+    def tray_click(self, x=0, y=0):
         """Clicking the icon always takes focus from Tux, so go by whether he's on screen."""
         if self.get_visible() and not self.minimized():
             self.put_away()
         else:
+            if self.in_bar():
+                self.drop_from_bar(x)
             self.summon()
+
+    def in_bar(self):
+        """Mini Tux in the top bar: he lives in his icon and drops down from it to talk."""
+        return self.opt("mode") == "mini" and self.settings.get("in_bar", False) \
+            and bool(self.tray and self.tray.shown)
+
+    def drop_from_bar(self, x=0):
+        """Put Mini Tux on the top edge, just under the bar, below where you clicked."""
+        if not self.x11:
+            return
+        wx, wy, ww, wh = self.x11.workarea()
+        x = x or self.x11.pointer()[0]
+        tw = MINI_TH * ART_W / ART_H
+        self.settings["edge"] = "top"
+        self.settings["t"] = min(1.0, max(0.0, (x - tw / 2 - wx) / max(1, ww - tw)))
+        self.placed_once = False
+        self.apply_mode()
 
     def tray_apply(self):
         """Start or stop the top-bar icon to match Settings."""
         if self.opt("tray") and not self.tray:
             self.tray = Tray(ART_PNG, self.tray_click, [
-                ("Show / hide Tux", self.tray_click),
+                ("Show / hide Tux", lambda: self.tray_click()),
                 ("Settings…", lambda: (self.summon(), self.show_settings(1))),
                 None,
                 ("Quit Tux", self.close),
@@ -2115,8 +2155,8 @@ class Tux(Gtk.ApplicationWindow):
 
         if page == 1:
             items = [
-                (f"Mode: {'Mini Tux (tiny, on the screen edge)' if mini else 'Free Tux (move & resize)'}",
-                 lambda: (self.set_mode("free" if mini else "mini"), self.show_settings(1))),
+                (f"Mode: {self.mode_label()}",
+                 lambda: (self.set_mode(self.next_mode()), self.show_settings(1))),
                 (f"Bubble: {self.SIDE_NAMES[self.opt('bubble_side')]}",
                  change("bubble_side", list(BUBBLE_SIDES), relayout=True)),
                 (f"See-through: {self._label(self.SEE_THROUGH, self.opt('opacity'))}",
@@ -2143,6 +2183,21 @@ class Tux(Gtk.ApplicationWindow):
             ]
         note = "" if self.x11 else " (on-top & edges need XWayland)"
         self.say_actions(f"Settings {page}/2{note}", items)
+
+    def mode_label(self):
+        if self.opt("mode") != "mini":
+            return "Free Tux (move & resize)"
+        if self.settings.get("in_bar"):
+            return "Mini Tux in the top bar"
+        return "Mini Tux (tiny, on the screen edge)"
+
+    def next_mode(self):
+        """Free → Mini → Mini in the top bar (when there's a tray to live in) → Free."""
+        if self.opt("mode") != "mini":
+            return "mini"
+        if not self.settings.get("in_bar") and self.tray and self.tray.shown:
+            return "bar"
+        return "free"
 
     def apply_theme(self):
         if self.opt("theme") == "dark":
@@ -2250,13 +2305,17 @@ class Tux(Gtk.ApplicationWindow):
             self.say("Staying on top needs XWayland, which isn't running here. Try your window "
                      "menu (often Alt+Space) → Always on Top.")
             return
-        self.say_actions("I can stay visible two ways:", [
+        ways = [
             ("Mini Tux: tiny, rides the screen edge", lambda: self.set_mode("mini")),
             ("Big Tux, kept on top of other windows",
              lambda: (self.set_mode("free") if self.L.mode == "mini" else None,
                       self.toggle_on_top(True))),
             ("Not now", lambda: self.say("No problem. Right-click me any time.")),
-        ])
+        ]
+        if self.tray and self.tray.shown:  # the top bar shows tray icons: he can live there
+            ways.insert(0, ("Mini Tux in the top bar: drops down when you need him",
+                            lambda: self.set_mode("bar")))
+        self.say_actions(f"I can stay handy {len(ways) - 1} ways:", ways)
 
     # ---- 📖 links: open in Help (yelp) if it's there, else show the gist in the bubble
     def open_help(self, uri):
