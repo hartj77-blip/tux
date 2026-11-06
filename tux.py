@@ -14,6 +14,7 @@ import math
 import os
 import random
 import re
+import shlex
 import shutil
 import sys
 import signal
@@ -41,7 +42,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
-from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo  # noqa: E402
 
 # ---------------------------------------------------------------- settings
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -237,6 +238,113 @@ def save_settings(d):
         pass
 
 
+# ---------------------------------------------------------------- keyboard shortcut
+# A GNOME custom shortcut (Settings → Keyboard → Custom Shortcuts) runs `tux.py --toggle`:
+# Tux pops up ready to type, and the same keys put him away again.
+SHORTCUT = "<Control><Alt>space"
+TOGGLE_CMD = f"python3 {shlex.quote(os.path.join(HERE, 'tux.py'))} --toggle"
+KEYS_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
+KEY_SCHEMA = KEYS_SCHEMA + ".custom-keybinding"
+KEY_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/tux/"
+TAKEN_IN = ("org.gnome.desktop.wm.keybindings", "org.gnome.shell.keybindings",
+            "org.gnome.mutter.keybindings", "org.gnome.mutter.wayland.keybindings", KEYS_SCHEMA)
+SHORTCUT_HOW = ("Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts, "
+                "add one that runs:\n```bash\n" + TOGGLE_CMD + "\n```")
+
+
+def _has_schema(sid):
+    src = Gio.SettingsSchemaSource.get_default()
+    return bool(src and src.lookup(sid, True))
+
+
+def _accel(a):
+    ok, key, mods = Gtk.accelerator_parse(a or "")
+    return (Gdk.keyval_to_lower(key), int(mods)) if ok and key else None
+
+
+def shortcut_get():
+    """Tux's keyboard shortcut as GNOME has it: the keys ("" = none set up), or None
+    if this desktop has no GNOME custom shortcuts."""
+    if not (_has_schema(KEYS_SCHEMA) and _has_schema(KEY_SCHEMA)):
+        return None
+    if KEY_PATH not in Gio.Settings.new(KEYS_SCHEMA).get_strv("custom-keybindings"):
+        return ""
+    return Gio.Settings.new_with_path(KEY_SCHEMA, KEY_PATH).get_string("binding")
+
+
+def shortcut_label(keys):
+    ok, key, mods = Gtk.accelerator_parse(keys or "")
+    return Gtk.accelerator_get_label(key, mods) if ok and key else (keys or "")
+
+
+def shortcut_taken(keys):
+    """What in GNOME already uses these keys, or None."""
+    want = _accel(keys)
+    for sid in TAKEN_IN:
+        if not _has_schema(sid):
+            continue
+        st = Gio.Settings.new(sid)
+        for name in st.props.settings_schema.list_keys():
+            v = st.get_value(name)
+            t = v.get_type_string()
+            vals = v.unpack() if t == "as" else [v.unpack()] if t == "s" else []
+            if want in map(_accel, vals):
+                return f"GNOME's “{name.replace('-', ' ')}” shortcut"
+    for path in Gio.Settings.new(KEYS_SCHEMA).get_strv("custom-keybindings"):
+        other = Gio.Settings.new_with_path(KEY_SCHEMA, path)
+        if path != KEY_PATH and _accel(other.get_string("binding")) == want:
+            return f"your custom shortcut “{other.get_string('name') or path}”"
+    return None
+
+
+def shortcut_set(on):
+    """Turn Tux's GNOME shortcut on or off -> (ok, message). Turning it on again keeps
+    keys you picked yourself and points it at this copy of Tux."""
+    keys = shortcut_get()
+    if keys is None:
+        return False, "This desktop has no GNOME shortcuts. In its keyboard settings, " \
+                      f"add a shortcut that runs:  {TOGGLE_CMD}"
+    media = Gio.Settings.new(KEYS_SCHEMA)
+    paths = media.get_strv("custom-keybindings")
+    mine = Gio.Settings.new_with_path(KEY_SCHEMA, KEY_PATH)
+    if not on:
+        if KEY_PATH in paths:
+            media.set_strv("custom-keybindings", [p for p in paths if p != KEY_PATH])
+        for k in ("name", "command", "binding"):
+            mine.reset(k)
+        Gio.Settings.sync()
+        return True, "Keyboard shortcut off."
+    if not keys:
+        taken = shortcut_taken(SHORTCUT)
+        if taken:
+            return False, f"{shortcut_label(SHORTCUT)} is already {taken}."
+        keys = SHORTCUT
+    mine.set_string("name", "Tux")
+    mine.set_string("command", TOGGLE_CMD)
+    mine.set_string("binding", keys)
+    if KEY_PATH not in paths:
+        media.set_strv("custom-keybindings", paths + [KEY_PATH])
+    Gio.Settings.sync()
+    return True, f"Keyboard shortcut: {shortcut_label(keys)}"
+
+
+def shortcut_cli(args):
+    """`tux.py --shortcut on|off|status`, for install.sh and uninstall.sh."""
+    if args[:1] == ["status"]:
+        keys = shortcut_get()
+        print("unsupported" if keys is None else f"on {shortcut_label(keys)}" if keys else "off")
+        return 0
+    if args[:1] in (["on"], ["off"]):
+        ok, msg = shortcut_set(args[0] == "on")
+        print(msg)
+        if not ok and shortcut_get() is not None:  # the keys are taken: say how to pick others
+            print("Pick your own: Settings → Keyboard → View and Customize Shortcuts → Custom "
+                  f"Shortcuts, add one that runs:  {TOGGLE_CMD}")
+        return 0 if ok else 1
+    print("usage: tux.py --shortcut on|off|status")
+    return 2
+
+
 def clean_env():
     """Environment for apps Tux opens (Help): don't push them onto X11 too."""
     env = dict(os.environ)
@@ -289,12 +397,22 @@ class X11:
         atom = lambda n: X.XInternAtom(self.dpy, n.encode(), 0)  # noqa: E731
         self.STATE, self.ABOVE = atom("_NET_WM_STATE"), atom("_NET_WM_STATE_ABOVE")
         self.STICKY, self.WORKAREA = atom("_NET_WM_STATE_STICKY"), atom("_NET_WORKAREA")
+        self.ACTIVE = atom("_NET_ACTIVE_WINDOW")
 
     def set_on_top(self, xid, on):
         """Above other windows + on every workspace (or neither)."""
         ev = _ClientMessage(type=33, send_event=1, display=self.dpy, window=xid,
                             message_type=self.STATE, format=32)
         ev.data[0], ev.data[1], ev.data[2], ev.data[3] = (1 if on else 0), self.ABOVE, self.STICKY, 1
+        self.X.XSendEvent(self.dpy, self.root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
+        self.X.XFlush(self.dpy)
+
+    def activate(self, xid):
+        """Ask the window manager to raise and focus Tux. Sent the way a taskbar does, so
+        it works when the keyboard shortcut calls him from the background."""
+        ev = _ClientMessage(type=33, send_event=1, display=self.dpy, window=xid,
+                            message_type=self.ACTIVE, format=32)
+        ev.data[0], ev.data[1], ev.data[2] = 2, 0, 0   # from a pager, current time, no window
         self.X.XSendEvent(self.dpy, self.root, 0, (1 << 20) | (1 << 19), ctypes.byref(ev))
         self.X.XFlush(self.dpy)
 
@@ -553,10 +671,18 @@ def bubble_layout(mode, edge, side, th, bw, bh, grip=False, font=12.5, valign="b
                   TEXT_TOP=2 * btn_r, FONT=font, SIDE=side)
 
 
-def free_layout(side="right"):
+# The box is narrow while Tux is idle or you're typing, and widens for an answer until a
+# command this many characters long fits on one line (most of Tux's commands are shorter).
+CMD_FIT = 44
+CMD_PAD = 36   # room around a command line inside the box: margins + its dark background
+FREE_BW = 282       # Free Tux's narrow box, in design units (everything scales with his window)
+FREE_BH_MAX = 270   # ...and the tallest it grows for a long answer
+
+
+def free_layout(side="right", bw=FREE_BW, bh=None):
     """Free Tux: move and resize anywhere (everything scales with the window)."""
-    bh = 150 if side in ("above", "below") else 172
-    return bubble_layout("free", None, side, th=150, bw=282, bh=bh, grip=True)
+    bh = bh or (150 if side in ("above", "below") else 172)
+    return bubble_layout("free", None, side, th=150, bw=bw, bh=bh, grip=True)
 
 
 def free_default_size(L):
@@ -570,13 +696,44 @@ OUTWARD = {"bottom": "below", "top": "above", "left": "left", "right": "right"}
 FLIP = {"right": "left", "left": "right", "above": "below", "below": "above"}
 
 
-def mini_layout(edge, side="right", bh=MINI_BH_MIN):
+def mini_layout(edge, side="right", bh=MINI_BH_MIN, bw=MINI_BW, valign=None, halign=None):
     if side == OUTWARD.get(edge):   # never point the box off the screen
         side = FLIP[side]
-    valign = {"bottom": "bottom", "top": "top"}.get(edge, "center")
-    halign = "right" if edge == "right" else "left"
-    return bubble_layout("mini", edge, side, th=MINI_TH, bw=MINI_BW, bh=bh, font=MINI_FONT,
+    valign = valign or {"bottom": "bottom", "top": "top"}.get(edge, "center")
+    halign = halign or ("right" if edge == "right" else "left")
+    return bubble_layout("mini", edge, side, th=MINI_TH, bw=bw, bh=bh, font=MINI_FONT,
                          valign=valign, halign=halign, btn_r=6)
+
+
+def mini_variants(edge, side):
+    """Ways to fit Mini Tux's box beside him on this edge, your choice first: the other
+    side of him, or the box growing the other way along the edge."""
+    if side == OUTWARD.get(edge):
+        side = FLIP[side]
+    if edge in ("top", "bottom"):
+        if side in ("left", "right"):        # box beside him, along the edge
+            return [(side, edge, None), (FLIP[side], edge, None)]
+        return [(side, None, "left"), (side, None, "right")]   # box above/below him
+    if side in ("above", "below"):            # left/right edge, box along it
+        return [(side, None, edge), (FLIP[side], None, edge)]
+    return [(side, "center", edge), (side, "bottom", edge), (side, "top", edge)]
+
+
+def tux_offset(L, edge):
+    """How far Tux's picture sits into the window along the edge he's on, and his length."""
+    ax, ay, th = L.ART
+    if edge in ("top", "bottom"):
+        return ax, th * ART_W / ART_H
+    return ay, th
+
+
+def edge_overflow(L, edge, t, wa):
+    """How many pixels of this layout's window would hang off the screen with Tux at t."""
+    wx, wy, ww, wh = wa
+    a, n = tux_offset(L, edge)
+    start, length, size = (wx, ww, L.DW) if edge in ("top", "bottom") else (wy, wh, L.DH)
+    pos = start + t * (length - n) - a
+    return max(0, start - pos) + max(0, pos + size - (start + length))
 
 
 FREE = free_layout()  # default; the real one follows your settings
@@ -1076,6 +1233,7 @@ class Tux(Gtk.ApplicationWindow):
         self.tick_src = GLib.timeout_add_seconds(1, self.tick)
         self.boxes = []              # [(x, y, w, h, kind, payload)] clickable bits of the bubble
         self.region_key = None
+        self.free_home = None        # Free Tux's size and spot with the narrow box, while it's wide
 
         css = Gtk.CssProvider()
         style = """
@@ -1134,21 +1292,25 @@ class Tux(Gtk.ApplicationWindow):
         self.connect("close-request", self.on_close)
         # once he's on screen: stay on top / take his spot (XWayland only)
         self.connect("map", lambda *_: GLib.timeout_add(150, self.place_window))
+        # Free Tux's box can only fit its text once his window is up (it sizes the window)
+        self.connect("map", lambda *_: GLib.timeout_add(250, lambda: self.fit_bubble() or False))
         if os.environ.get("TUX_TEST") and self.x11:  # test windows never take your keyboard
             self.connect("realize", lambda *_: self.no_focus_on_map())
+        self.apply_mode()
+        self.apply_theme()
+        self.kb.lib.use_arch = self.opt("arch_wiki") and have_arch()  # opt-in add-on
+        self.bubble_text = self.greeting()
+        self.fit_bubble(force=True)
 
     def no_focus_on_map(self):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             self.get_surface().set_user_time(0)
-        self.apply_mode()
-        self.apply_theme()
-        self.kb.lib.use_arch = self.opt("arch_wiki") and have_arch()  # opt-in add-on
-        self.bubble_text = self.greeting()
-        self.fit_mini(force=True)
 
     def greeting(self):
-        return f"{self.kb.tip()}\nAsk me anything. Right-click for settings."
+        keys = shortcut_get()
+        how = f" ({shortcut_label(keys)} from anywhere)" if keys else ""
+        return f"{self.kb.tip()}\nAsk me anything{how}. Right-click for settings."
 
     # ---- geometry
     def geom(self):
@@ -1412,6 +1574,7 @@ class Tux(Gtk.ApplicationWindow):
         if self.bubble_hidden:
             self.bubble_hidden = False
             self.region_key = None
+            self.fit_bubble()
             self.area.queue_draw()
         if not self.tick_src:
             self.tick_src = GLib.timeout_add_seconds(1, self.tick)
@@ -1428,7 +1591,7 @@ class Tux(Gtk.ApplicationWindow):
         self.bubble_hidden = True
         if not self.entry.get_text():
             self.entry.set_visible(False)
-        self.fit_mini()
+        self.fit_bubble()
         self.region_key = None
         self.area.queue_draw()
         self.tick_src = None
@@ -1449,6 +1612,7 @@ class Tux(Gtk.ApplicationWindow):
         if self.buttons_on() and self.inside_circle(dx, dy, self.L.BTN_MIN):
             self.minimize(); return
         if self.L.GRIP and self.inside_circle(dx, dy, self.L.GRIP, 4):
+            self.free_home = None   # you're resizing him: that's his new size
             surf.begin_resize(Gdk.SurfaceEdge.SOUTH_EAST, dev, btn, x, y, t); return
         for bx, by, bw, bh, kind, payload in self.boxes:
             if bx <= x <= bx + bw and by <= y <= by + bh:
@@ -1477,6 +1641,7 @@ class Tux(Gtk.ApplicationWindow):
         cx, cy, rx, ry = self.L.BELLY
         if math.hypot((dx - cx) / rx, (dy - cy) / ry) <= 1 and n_press == 1:
             self.show_entry(); return
+        self.free_home = None   # you're moving him: wherever he lands is his new spot
         surf.begin_move(dev, btn, x, y, t)
 
     # ---- Mini Tux rides the screen edges
@@ -1491,23 +1656,16 @@ class Tux(Gtk.ApplicationWindow):
             d["moved"] = True
             d["wa"] = self.x11.workarea()
         wx, wy, ww, wh = d["wa"]
-        # the edge nearest the pointer, and how far along it
+        # the edge nearest the pointer, and how far along it (Tux's middle under the pointer)
         dist = {"left": px - wx, "right": wx + ww - px, "top": py - wy, "bottom": wy + wh - py}
         edge = min(dist, key=dist.get)
-        if edge != self.L.edge:
-            self.settings["edge"] = edge
-            self.L = mini_layout(edge, self.opt("bubble_side"), self.L.BUBBLE[3])
-            self.set_default_size(int(self.L.DW), int(self.L.DH))
-            self.region_key = None
-            self.area.queue_draw()
-        ax, ay, ah = self.L.ART
-        if edge in ("top", "bottom"):  # keep Tux's middle under the pointer
-            span = max(1, ww - self.L.DW)
-            t = (px - (ax + ah * ART_W / ART_H / 2) - wx) / span
+        tw = MINI_TH * ART_W / ART_H
+        if edge in ("top", "bottom"):
+            t = (px - tw / 2 - wx) / max(1, ww - tw)
         else:
-            span = max(1, wh - self.L.DH)
-            t = (py - (ay + ah / 2) - wy) / span
-        self.settings["t"] = min(1.0, max(0.0, t))
+            t = (py - MINI_TH / 2 - wy) / max(1, wh - MINI_TH)
+        self.settings["edge"], self.settings["t"] = edge, min(1.0, max(0.0, t))
+        self.set_layout(self.mini_shape(self.L.BUBBLE[3], self.L.BUBBLE[2], d["wa"]))
         self.x11.move(self.xid(), *self.edge_pos(edge, self.settings["t"], d["wa"]))
 
     def on_drag_end(self, *_):
@@ -1520,15 +1678,17 @@ class Tux(Gtk.ApplicationWindow):
             self.show_entry()  # just a click on Mini Tux: ask him something
 
     def edge_pos(self, edge, t, wa=None, size=None):
+        """Where Mini Tux's window goes. t (0..1 along the edge) is where Tux himself sits,
+        so his box can grow and shrink beside him while he stays put; the window only
+        slides if the box would otherwise hang off the screen."""
         wx, wy, ww, wh = wa or self.x11.workarea()
         W, H = size or (self.L.DW, self.L.DH)
-        if edge == "bottom":
-            return wx + t * (ww - W), wy + wh - H
-        if edge == "top":
-            return wx + t * (ww - W), wy
-        if edge == "left":
-            return wx, wy + t * (wh - H)
-        return wx + ww - W, wy + t * (wh - H)
+        a, n = tux_offset(self.L, edge)
+        if edge in ("top", "bottom"):
+            x = min(max(wx + t * (ww - n) - a, wx), wx + ww - W)
+            return x, (wy + wh - H if edge == "bottom" else wy)
+        y = min(max(wy + t * (wh - n) - a, wy), wy + wh - H)
+        return (wx if edge == "left" else wx + ww - W), y
 
     def xid(self):
         with warnings.catch_warnings():
@@ -1544,10 +1704,10 @@ class Tux(Gtk.ApplicationWindow):
 
     # ---- the two modes
     def apply_mode(self):
+        self.free_home = None
         if self.opt("mode") == "mini":
-            self.L = mini_layout(self.settings.get("edge", "bottom"), self.opt("bubble_side"))
-            self.set_default_size(int(self.L.DW), int(self.L.DH))
-            self.fit_mini(force=True)
+            self.set_layout(self.mini_shape())
+            self.fit_bubble(force=True)
         else:
             self.L = free_layout(self.opt("bubble_side"))
             w, h = self.settings.get("free_size") or free_default_size(self.L)
@@ -1560,31 +1720,143 @@ class Tux(Gtk.ApplicationWindow):
         if self.get_mapped():
             GLib.timeout_add(150, self.place_window)
 
-    def fit_mini(self, force=False):
-        """Mini Tux's box grows to fit its message and shrinks back when idle."""
-        if self.L.mode != "mini":
-            return
+    def set_layout(self, L):
+        """Switch to a new Mini Tux layout and resize his window to match."""
+        if (L.DW, L.DH, L.BUBBLE, L.SIDE, L.ART) != (self.L.DW, self.L.DH, self.L.BUBBLE,
+                                                      self.L.SIDE, self.L.ART):
+            self.region_key = None
+            self.area.queue_draw()
+        self.L = L
+        self.set_default_size(math.ceil(L.DW), math.ceil(L.DH))
+
+    def mini_shape(self, bh=MINI_BH_MIN, bw=MINI_BW, wa=None):
+        """Mini Tux's layout at this box size. The box goes on the side you picked, unless
+        it wouldn't fit there at its biggest, where Tux sits; then it goes the other way,
+        so Tux never has to move for it."""
+        edge = self.settings.get("edge", "bottom")
+        variants = mini_variants(edge, self.opt("bubble_side"))
+        if self.x11:
+            wa = wa or self.x11.workarea()
+            t = self.settings.get("t", 0.95)
+            big = (MINI_BH_MAX, self.widest_box(1.0, MINI_FONT))
+            variants.sort(key=lambda v: edge_overflow(mini_layout(edge, v[0], *big, *v[1:]),
+                                                      edge, t, wa))   # stable: your pick wins ties
+        return mini_layout(edge, variants[0][0], bh, bw, *variants[0][1:])
+
+    def measure(self, s=1.0, font=None):
+        """Text measuring at the size Tux draws it (s = Free Tux's scale): a context, the
+        font size and the answer's blocks."""
+        cr = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+        blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
+        return cr, (font or self.L.FONT) * self.opt("text_size") * s, blocks
+
+    @staticmethod
+    def mono_width(cr, text, size):
+        lay = PangoCairo.create_layout(cr)
+        lay.set_font_description(Pango.FontDescription.from_string(f"Monospace {max(size, 5):.1f}"))
+        lay.set_text(text, -1)
+        return lay.get_pixel_size()[0]
+
+    def widest_box(self, s, font=None):
+        """The widest the box gets, in design units: a CMD_FIT-character command fits."""
+        cr, size, _ = self.measure(s, font)
+        return self.mono_width(cr, "0" * CMD_FIT, size) / s + CMD_PAD
+
+    def wanted_box(self, s=1.0):
+        """Box size (width, height) for what Tux is saying. Narrow and short when he's idle;
+        wider when a command would wrap (up to widest_box()), and taller when there's more
+        text, so it never has to shrink."""
+        mini = self.L.mode == "mini"
+        narrow, short, tall = ((MINI_BW, MINI_BH_MIN, MINI_BH_MAX) if mini else
+                               (FREE_BW, free_layout(self.L.SIDE).BUBBLE[3], FREE_BH_MAX))
         if not self.bubble_on():
-            bh = MINI_BH_MIN
-        else:
-            pad = 12 + 12 + self.L.TEXT_TOP + (self.L.ENTRY[3] + 6 if self.entry.get_visible() else 0)
-            bh = int(min(MINI_BH_MAX, max(MINI_BH_MIN, self.text_height(MINI_BW - 24) + pad)))
-        if not force and abs(bh - self.L.BUBBLE[3]) < 4:
+            return narrow, short
+        cr, size, blocks = self.measure(s)
+        widest = self.widest_box(s)
+        cmds = [txt for kind, txt in blocks if kind == "cmd"]
+        bw = narrow
+        if cmds:
+            longest = max(self.mono_width(cr, c, size) for c in cmds) / s + CMD_PAD
+            bw = max(narrow, min(widest, longest))
+
+        def need(w):  # box height the text needs at this width
+            return self.text_height(w - 24, s) + self.box_pad()
+
+        h = need(bw)
+        if h > tall and bw < widest and need(widest) < h:
+            bw, h = widest, need(widest)   # a long answer: wider beats tiny or cut-off text
+        return math.ceil(bw), int(min(tall, max(short, h)))
+
+    def box_pad(self):
+        """Box height that isn't text: margins, the button row, the text box if it's open."""
+        return 24 + self.L.TEXT_TOP + (self.L.ENTRY[3] + 6 if self.entry.get_visible() else 0)
+
+    def fit_bubble(self, force=False):
+        """The box fits its message: wider for a long command, taller for more text. It
+        shrinks back when Tux goes idle."""
+        if self.L.mode == "free":
+            self.fit_free(force)
             return
-        self.L = mini_layout(self.L.edge, self.opt("bubble_side"), bh)
-        self.set_default_size(int(self.L.DW), int(self.L.DH))
-        self.region_key = None
-        self.area.queue_draw()
+        bw, bh = self.wanted_box()
+        old = self.L.BUBBLE
+        if not force and abs(bh - old[3]) < 4 and abs(bw - old[2]) < 4:
+            return
+        self.set_layout(self.mini_shape(bh, bw))
         if self.x11 and self.get_mapped() and not self.mini_drag:  # stay on the edge
             self.x11.move(self.xid(), *self.edge_pos(self.L.edge, self.settings.get("t", 0.95)))
 
-    def text_height(self, width):
-        """How tall the current bubble text is at the normal font size (Mini Tux sizing)."""
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-        cr = cairo.Context(surf)
-        size = self.L.FONT * self.opt("text_size")
-        blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
-        return self.layout_blocks(cr, blocks, width, size, 1.0)[1]
+    def fit_free(self, force=False):
+        """Free Tux: his window grows beside him to fit the answer and goes back after, to
+        exactly the size and spot you gave him. Tux stays put; the window only slides if the
+        box would run off the screen."""
+        if not self.get_mapped() or min(self.get_default_size()) <= 0:
+            return
+        side = self.L.SIDE
+        narrow = free_layout(side)
+        home = self.free_home or self.free_home_now()
+        s = min(home["w"] / narrow.DW, home["h"] / narrow.DH)
+        bw, bh = self.wanted_box(s)
+        if not self.x11:  # can't move the window to keep Tux put: only grow away from him
+            if free_layout(side, bw, bh).ART[1] != narrow.ART[1]:
+                bh = narrow.BUBBLE[3]
+            if free_layout(side, bw, bh).ART[0] != narrow.ART[0]:
+                bw = FREE_BW
+        old = self.L.BUBBLE
+        if not force and abs(bw - old[2]) < 4 and abs(bh - old[3]) < 4:
+            return
+        new = free_layout(side, bw, bh)
+        nw = home["w"] + math.ceil((new.DW - narrow.DW) * s)
+        nh = home["h"] + math.ceil((new.DH - narrow.DH) * s)
+        grown = new.BUBBLE != narrow.BUBBLE
+        self.L = new
+        self.region_key = None
+        self.set_default_size(nw, nh)
+        self.area.queue_draw()
+        if self.x11:   # Tux stays put
+            x = home["x"] + round((narrow.ART[0] - new.ART[0]) * s)
+            y = home["y"] + round((narrow.ART[1] - new.ART[1]) * s)
+            if grown:  # ...unless the box would run off the screen
+                wx, wy, ww, wh = self.x11.workarea()
+                x, y = max(wx, min(x, wx + ww - nw)), max(wy, min(y, wy + wh - nh))
+            self.x11.move(self.xid(), x, y)
+        self.free_home = home if grown else None
+
+    def free_home_now(self):
+        """Free Tux's size and spot with the narrow box, worked out from how he is now."""
+        w, h = self.get_default_size()
+        narrow = free_layout(self.L.SIDE)
+        s = min(w / self.L.DW, h / self.L.DH)
+        x, y = self.x11.pos(self.xid()) if self.x11 else (None, None)
+        if x is not None:
+            x = round(x + (self.L.ART[0] - narrow.ART[0]) * s)
+            y = round(y + (self.L.ART[1] - narrow.ART[1]) * s)
+        return {"w": round(w - (self.L.DW - narrow.DW) * s),
+                "h": round(h - (self.L.DH - narrow.DH) * s), "x": x, "y": y}
+
+    def text_height(self, width, s=1.0):
+        """How tall the current bubble text is, in design units, at this box text width."""
+        cr, size, blocks = self.measure(s)
+        return self.layout_blocks(cr, blocks, width * s, size, s)[1] / s
 
     def place_window(self):
         """On top / position. Needs XWayland; without it Tux is a normal window."""
@@ -1619,14 +1891,17 @@ class Tux(Gtk.ApplicationWindow):
                  else "Okay, I'm a normal window again.")
 
     def remember_free_spot(self):
+        """Save Free Tux's size and spot as they are with the narrow box."""
         if self.L.mode == "free" and self.get_mapped():
-            self.settings["free_size"] = [self.get_width(), self.get_height()]
+            home = self.free_home or self.free_home_now()
+            self.settings["free_size"] = [home["w"], home["h"]]
             if self.x11:
-                self.settings["free_pos"] = list(self.x11.pos(self.xid()))
+                self.settings["free_pos"] = [home["x"], home["y"]]
 
     def on_scroll(self, ctl, _dx, dy):
         if self.L.mode == "mini" or not (ctl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK):
             return False
+        self.free_home = None
         h = self.get_height()
         nh = max(110, min(320, int(h * (0.9 if dy > 0 else 1.1))))  # wide layout: keep it sane
         self.set_default_size(int(nh * self.L.DW / self.L.DH), nh)
@@ -1656,13 +1931,42 @@ class Tux(Gtk.ApplicationWindow):
             threading.Thread(target=self.prewarm, args=(self.gen,), daemon=True).start()
             self.check_clipboard()
         self.entry.set_visible(True)
-        self.fit_mini()
+        self.fit_bubble()
         self.region_key = None
         self.area.queue_draw()
         self.entry.grab_focus()
         if prefix:
             self.entry.set_text(prefix)
             self.entry.set_position(-1)
+
+    # ---- the keyboard shortcut (tux.py --toggle)
+    def toggle(self):
+        """Not focused (or tucked away): call Tux up. Already focused: put him away."""
+        if self.is_active() and not self.minimized():
+            self.put_away()
+        else:
+            self.summon()
+
+    def minimized(self):
+        surf = self.get_surface()
+        return bool(surf and surf.get_state() & Gdk.ToplevelState.MINIMIZED)
+
+    def summon(self):
+        """Up front, bubble showing, text box open and ready to type."""
+        self.present()
+        if self.x11:  # once he's on screen, make sure he gets the keyboard
+            GLib.timeout_add(80, lambda: (self.get_mapped() and self.x11.activate(self.xid()),
+                                          False)[-1])
+        self.touch()
+        self.show_entry()
+
+    def put_away(self):
+        """Hand the keyboard back to whatever you were using: he minimizes, like the yellow
+        button. The shortcut brings him straight back."""
+        if not self.entry.get_text():
+            self.entry.set_visible(False)
+            self.region_key = None
+        self.minimize()
 
     def copy(self, text):
         self.last_copied = text
@@ -1772,6 +2076,7 @@ class Tux(Gtk.ApplicationWindow):
                 (f"Keep on top: {on_top}",
                  (lambda: self.show_settings(2)) if mini else
                  (lambda: (self.toggle_on_top(), self.show_settings(2)))),
+                (f"Keyboard shortcut: {self.shortcut_state()}", self.shortcut_offer),
                 (f"Arch Wiki: {self.wiki_state()}", self.wiki_offer),
                 ("‹ Back", lambda: self.show_settings(1)),
             ]
@@ -1785,6 +2090,29 @@ class Tux(Gtk.ApplicationWindow):
             self.entry.remove_css_class("dark")
         self.region_key = None
         self.area.queue_draw()
+
+    # ---- the keyboard shortcut that calls Tux from anywhere (a GNOME custom shortcut)
+    def shortcut_state(self):
+        keys = shortcut_get()
+        return "how to add one" if keys is None else shortcut_label(keys) if keys else "off"
+
+    def shortcut_offer(self):
+        keys = shortcut_get()
+        back = [("‹ Back to settings", lambda: self.show_settings(2))]
+        if keys is None:
+            self.say_actions("This desktop isn't GNOME, so add it in its keyboard settings: "
+                             f"a shortcut that runs\n```bash\n{TOGGLE_CMD}\n```", back)
+            return
+        ok, msg = shortcut_set(not keys)
+        if not ok:
+            self.say_actions(f"{msg} To pick other keys: {SHORTCUT_HOW}", back)
+        elif keys:  # it was on, now it's off
+            self.show_settings(2)
+        else:
+            self.say_actions(f"Press {shortcut_label(shortcut_get())} from anywhere to call me "
+                             "up, ready to type. Press it again to put me away. Change the keys "
+                             "in Settings → Keyboard → View and Customize Shortcuts → Custom "
+                             "Shortcuts.", back)
 
     # ---- the optional offline Arch Wiki (download / switch on / off / delete)
     def wiki_state(self):
@@ -1923,7 +2251,7 @@ class Tux(Gtk.ApplicationWindow):
             self.region_key = None
         self.bubble_text = text
         self.touch()
-        self.fit_mini()
+        self.fit_bubble()
         self.area.queue_draw()
         return False
 
@@ -2099,7 +2427,25 @@ class App(Gtk.Application):
     def __init__(self):
         # TUX_TEST=1: separate instance for tests, so it never hijacks your open Tux
         test = bool(os.environ.get("TUX_TEST"))
-        super().__init__(application_id="local.tux.helper" + (".test" if test else ""))
+        super().__init__(application_id="local.tux.helper" + (".test" if test else ""),
+                         flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
+        self.add_main_option("toggle", 0, GLib.OptionFlags.NONE, GLib.OptionArg.NONE,
+                             "Call Tux up ready to type, or put him away (for a keyboard "
+                             "shortcut)", None)
+
+    def do_command_line(self, cmdline):
+        """Runs in the Tux that's already open (a second `tux.py` just passes its options
+        along), or in a new one if none is."""
+        win = self.get_active_window()
+        if cmdline.get_options_dict().contains("toggle"):
+            if win:
+                win.toggle()
+            else:  # not running yet: start up ready to type
+                self.activate()
+                self.get_active_window().summon()
+        else:
+            self.activate()
+        return 0
 
     def do_activate(self):
         if not os.path.exists(INDEX):  # first run: build the Help/man index
@@ -2161,5 +2507,7 @@ def snapshot(win, path):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--shortcut"]:  # set up / remove the keyboard shortcut, then exit
+        sys.exit(shortcut_cli(sys.argv[2:]))
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    App().run(None)
+    sys.exit(App().run(sys.argv))
