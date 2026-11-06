@@ -28,6 +28,7 @@ import cairo
 import gi
 
 from knowledge import Library, best_window, have_arch  # Tux's offline Linux library
+from tray import Tray  # his icon in the top bar (system tray)
 from explain import NO_HELP, as_text, breakdown, looks_like_command, strip_ask  # "what would this do?"
 
 # software rendering: ~half the RAM of GTK's GL renderer and leaves the GPU alone
@@ -1245,6 +1246,8 @@ class Tux(Gtk.ApplicationWindow):
         self.bubble_hidden = False   # tucked away after HIDE_SECS of nothing happening
         self.last_activity = time.monotonic()
         self.tick_src = GLib.timeout_add_seconds(1, self.tick)
+        self.tray = None             # top-bar icon (Settings → Taskbar icon)
+        GLib.idle_add(lambda: (self.tray_apply(), False)[-1])
         self.boxes = []              # [(x, y, w, h, kind, payload)] clickable bits of the bubble
         self.region_key = None
         self.free_home = None        # Free Tux's size and spot with the narrow box, while it's wide
@@ -1624,7 +1627,7 @@ class Tux(Gtk.ApplicationWindow):
         if self.buttons_on() and self.inside_circle(dx, dy, self.L.BTN_CLOSE):
             self.close(); return
         if self.buttons_on() and self.inside_circle(dx, dy, self.L.BTN_MIN):
-            self.minimize(); return
+            self.tuck_away(); return
         if self.L.GRIP and self.inside_circle(dx, dy, self.L.GRIP, 4):
             self.free_home = None   # you're resizing him: that's his new size
             surf.begin_resize(Gdk.SurfaceEdge.SOUTH_EAST, dev, btn, x, y, t); return
@@ -1711,7 +1714,8 @@ class Tux(Gtk.ApplicationWindow):
 
     # ---- settings (right-click) values, with defaults
     DEFAULTS = {"mode": "free", "bubble_side": "right", "opacity": 0.97, "text_size": 1.0,
-                "theme": "light", "hide_secs": HIDE_SECS, "on_top": False, "arch_wiki": False}
+                "theme": "light", "hide_secs": HIDE_SECS, "on_top": False, "arch_wiki": False,
+                "tray": True}
 
     def opt(self, key):
         return self.settings.get(key, self.DEFAULTS[key])
@@ -1967,6 +1971,8 @@ class Tux(Gtk.ApplicationWindow):
 
     def summon(self):
         """Up front, bubble showing, text box open and ready to type."""
+        if not self.get_visible():
+            self.set_visible(True)
         self.present()
         if self.x11:  # once he's on screen, make sure he gets the keyboard
             GLib.timeout_add(80, lambda: (self.get_mapped() and self.x11.activate(self.xid()),
@@ -1980,7 +1986,45 @@ class Tux(Gtk.ApplicationWindow):
         if not self.entry.get_text():
             self.entry.set_visible(False)
             self.region_key = None
-        self.minimize()
+        self.tuck_away()
+
+    def tuck_away(self):
+        """Minimize, or with the top-bar icon showing, hide into it (gone from the dock too)."""
+        if self.tray and self.tray.shown:
+            self.remember_free_spot()
+            self.placed_once = False     # put him back where he was when he returns
+            self.set_visible(False)
+        else:
+            self.minimize()
+
+    def tray_click(self):
+        """Clicking the icon always takes focus from Tux, so go by whether he's on screen."""
+        if self.get_visible() and not self.minimized():
+            self.put_away()
+        else:
+            self.summon()
+
+    def tray_apply(self):
+        """Start or stop the top-bar icon to match Settings."""
+        if self.opt("tray") and not self.tray:
+            self.tray = Tray(ART_PNG, self.tray_click, [
+                ("Show / hide Tux", self.tray_click),
+                ("Settings…", lambda: (self.summon(), self.show_settings(1))),
+                None,
+                ("Quit Tux", self.close),
+            ], on_change=lambda shown: self.get_visible() or shown or self.summon())
+            if not self.tray.start():
+                self.tray = None
+        elif not self.opt("tray") and self.tray:
+            self.tray.stop()
+            self.tray = None
+            if not self.get_visible():
+                self.summon()
+
+    def tray_state(self):
+        if not self.opt("tray"):
+            return "off"
+        return "on" if self.tray and self.tray.shown else "on (this desktop shows no tray icons)"
 
     def copy(self, text):
         self.last_copied = text
@@ -2091,6 +2135,9 @@ class Tux(Gtk.ApplicationWindow):
                  (lambda: self.show_settings(2)) if mini else
                  (lambda: (self.toggle_on_top(), self.show_settings(2)))),
                 (f"Keyboard shortcut: {self.shortcut_state()}", self.shortcut_offer),
+                (f"Taskbar icon: {self.tray_state()}",
+                 lambda: (self._cycle("tray", [True, False]), self.tray_apply(),
+                          GLib.timeout_add(300, lambda: (self.show_settings(2), False)[-1]))),
                 (f"Arch Wiki: {self.wiki_state()}", self.wiki_offer),
                 ("‹ Back", lambda: self.show_settings(1)),
             ]
@@ -2512,6 +2559,8 @@ class Tux(Gtk.ApplicationWindow):
         self.remember_free_spot()
         save_settings(self.settings)
         self.brain.stop()
+        if self.tray:
+            self.tray.stop()
         return False
 
 
@@ -2554,7 +2603,7 @@ class App(Gtk.Application):
         for i, label in enumerate(filter(None, os.environ.get("TUX_CLICKS", "").split("|"))):
             def click(label=label):
                 if label == "options":
-                    win.show_options()
+                    win.show_settings(1)
                 elif label in win.actions:
                     win.actions[label]()
                 else:
