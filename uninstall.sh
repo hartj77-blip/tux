@@ -16,11 +16,17 @@ main() {
     local desktop="${XDG_DATA_HOME:-$HOME/.local/share}/applications/tux.desktop"
     [ -f "$desktop" ] && rm -f "$desktop" && echo "  Removed Tux from the app grid."
 
-    # 3. settings (mode, theme, where you left him…)
+    # 3. his keyboard shortcut (only Tux's own; your other shortcuts stay as they are)
+    case "$(python3 "$TUX_DIR/tux.py" --shortcut status 2>/dev/null || true)" in
+        on*) python3 "$TUX_DIR/tux.py" --shortcut off >/dev/null 2>&1 &&
+                 echo "  Removed Tux's keyboard shortcut." || true ;;
+    esac
+
+    # 4. settings (mode, theme, where you left him…)
     local conf="${XDG_CONFIG_HOME:-$HOME/.config}/tux"
     [ -d "$conf" ] && rm -rf "$conf" && echo "  Removed Tux's settings."
 
-    # 4. the optional ~/.bashrc line (only the lines Tux added; the rest is untouched)
+    # 5. the optional ~/.bashrc line (only the lines Tux added; the rest is untouched)
     local MARK="# tux: save history after every command"
     if grep -qF "$MARK" ~/.bashrc 2>/dev/null; then
         cp ~/.bashrc ~/.bashrc.tux-uninstall-backup
@@ -36,7 +42,7 @@ EOF
         echo "  Removed Tux's line from ~/.bashrc (backup: ~/.bashrc.tux-uninstall-backup)."
     fi
 
-    # 5. the Tux folder itself: ask first
+    # 6. the Tux folder itself: ask first
     local yn=n
     if [ -t 0 ]; then
         read -rp "Also delete the Tux folder ($TUX_DIR, ~1 GB with the model)? [y/N] " yn
