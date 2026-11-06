@@ -2685,6 +2685,10 @@ class Tux(Gtk.ApplicationWindow):
         if out is None:
             return
         out = out.strip()
+        if "only know Linux" in out and re.search(r"&&|\|\||[|;<>]|(^|\s)\.{0,2}/|~/|\$\(", q):
+            # looks like a shell command he couldn't break down: never refuse that
+            out = ("That looks like a shell command, but I couldn't read all of it. Try "
+                   "\"what does `…` do?\" with just the command in the backticks.")
         if recent and "only know Linux" in out:
             # the model can't see command output; be straight about it instead of refusing
             out = (f"Last command: `{recent[-1]}`\nI can't see its output. "

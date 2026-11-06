@@ -128,15 +128,16 @@ def looks_like_command(s, known=None, explicit=False):
     while first in WRAPPERS and len(words_) > 1 or re.fullmatch(r"\w+=\S*", first) and len(words_) > 1:
         words_ = words_[1:]
         first = words_[0]
-    if not re.fullmatch(r"[\w.+-]+|\./[\w./+-]+", first):
+    script = bool(re.fullmatch(r"(\.{1,2}|~)?/[\w./+-]+", first))   # ./install.sh, ~/bin/x
+    if not script and not re.fullmatch(r"[\w.+-]+", first):
         return False
-    is_cmd = (known is not None and first.lower() in known) or bool(shutil.which(first)) \
-        or first.startswith("./")
+    is_cmd = script or first in SHELL_BUILTINS or first in ("history", "alias") \
+        or (known is not None and first.lower() in known) or bool(shutil.which(first))
     if not is_cmd:
         return False
     rest = words_[1:]
     # "find big files" is a question; "find . -name x" / "cat /etc/fstab" / "ls | wc" are commands
-    shellish = any(t.startswith("-") for t in rest) or any(t in OPERATORS for t in toks) \
+    shellish = script or any(t.startswith("-") for t in rest) or any(t in OPERATORS for t in toks) \
         or any(re.search(r"[/~*=$]|^\.\.?$|\.\w{1,4}$", t) for t in rest) or toks[0] in WRAPPERS
     if explicit and not rest:
         return True
@@ -401,6 +402,7 @@ def breakdown(cmd_line, lib=None, summaries=None, max_lines=9):
     except ValueError:
         return {"lines": ["I can't read that: a quote isn't closed."], "warnings": [], "commands": []}
     lines, warns, cmds = [], [], []
+    cwd = None                      # where an earlier `cd` in this line went
     for op, words_, redir in segments(toks):
         if op:
             lines.append(f"`{op}` {OPERATORS.get(op, '')}".rstrip())
@@ -417,8 +419,19 @@ def breakdown(cmd_line, lib=None, summaries=None, max_lines=9):
             cmd, args = words_[0], words_[1:]
             name = os.path.basename(cmd)
             cmds.append(name)
+            if name == "cd":                          # cd ~/tux: say where, and remember it
+                where = args[0] if args else "~"
+                lines.append(f"`cd {where}` " + ("goes back to the last folder" if where == "-"
+                                                 else f"goes into the folder {where}"))
+                cwd = None if where == "-" else os.path.normpath(os.path.join(
+                    cwd or os.getcwd(), os.path.expanduser(where)))
+                continue
+            if "/" in cmd:                            # ./install.sh: a script, not a program
+                lines.append(f"`{cmd}` " + script_summary(cmd, cwd))
+                warns.append("Runs a script: it can do anything you can. Only run ones you trust.")
+                continue
             desc = SHELL_BUILTINS.get(name) or whatis(name, summaries)
-            lines.append(f"`{name}` " + (desc or ("your own script" if "/" in cmd else "(no manual page here)")))
+            lines.append(f"`{name}` " + (desc or "(no manual page here)"))
             if name == "tar" and args and re.fullmatch(r"[A-Za-z]+", args[0]):
                 args = ["-" + args[0]] + args[1:]       # tar xzf -> tar -xzf
             text = help_text(name, lib) if args and name not in SHELL_BUILTINS else ""
@@ -432,7 +445,9 @@ def breakdown(cmd_line, lib=None, summaries=None, max_lines=9):
                 if a == "--" or a == "SUBST":
                     continue
                 kv = re.fullmatch(r"(\w+)=(.*)", a)
-                if kv and kv.group(1) in docs:              # dd if=… of=…
+                if kv and name in ("export", "alias", "set", "declare"):   # export PATH=…
+                    lines.append(f"`{kv.group(1)}=…` sets {kv.group(1)} to {kv.group(2) or 'nothing'}")
+                elif kv and kv.group(1) in docs:              # dd if=… of=…
                     lines.append(f"`{a}` " + docs[kv.group(1)].replace("{}", kv.group(2)))
                 elif a.startswith("-") and len(a) > 1 and (a in docs or not re.fullmatch(r"[-+]\d+", a)):
                     for f in flag_parts(a, docs):
@@ -467,6 +482,42 @@ def breakdown(cmd_line, lib=None, summaries=None, max_lines=9):
     if len(lines) > max_lines:
         lines = lines[:max_lines - 1] + [f"…and {len(lines) - max_lines + 1} more parts"]
     return {"lines": lines, "warnings": uniq, "commands": cmds}
+
+
+def script_summary(cmd, cwd=None):
+    """What a script says it does: its first comment lines, read (never run) from the file.
+    `cwd`: the folder an earlier `cd` in the same line went to."""
+    base = cwd or os.getcwd()
+    path = os.path.normpath(os.path.join(base, os.path.expanduser(cmd)))
+    name = os.path.basename(cmd)
+    if not cwd and not cmd.startswith(("/", "~")):
+        # Tux can't see which folder your terminal is in, so he can't know which file it is
+        return f"runs the script {name} from the folder your terminal is in"
+    else:
+        here = f"in {os.path.dirname(path).replace(os.path.expanduser('~'), '~', 1)}"
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return f"runs the script {name} {here} (I don't run or read scripts I can't find)"
+    if b"\0" in head:
+        return f"runs the program {name} {here}"
+    said = []
+    for line in head.decode("utf-8", "ignore").splitlines()[:15]:
+        line = line.strip()
+        if line.startswith("#!") or not line:
+            if said:
+                break
+            continue
+        if not line.startswith("#"):
+            break
+        said.append(line.lstrip("# ").strip())
+        if len(" ".join(said)) > 140:
+            break
+    gist = re.sub(r"\s+", " ", " ".join(said)).strip()
+    if len(gist) > 120:
+        gist = gist[:120].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    return f"runs the script {name} {here}" + (f". It says: “{gist}”" if gist else "")
 
 
 def as_text(b):
