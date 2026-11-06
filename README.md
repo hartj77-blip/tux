@@ -7,7 +7,7 @@ the exact command, right on your machine. No cloud, no account.
 His brain is a small AI model that runs on your own CPU: **Qwen2.5-Coder 1.5B**, run by
 **llama.cpp**. 
 
-![Tux answering a question](tux-art.png)
+![Tux explaining what a find command would do, with a warning that it deletes files](screenshot.png)
 
 ## Install
 
@@ -60,7 +60,8 @@ system packages from the install step stay, since other apps use them too.
 | Click the 📖 link | Opens the matching GNOME Help page (no Help app installed? He shows the gist in the bubble and the command to install it) |
 | Drag him | Move |
 | Drag the lines on his right foot / `Ctrl+scroll` | Resize |
-| Yellow / red button on his head | Minimize / close |
+| Click his icon in the top bar | Call him up / put him away. Right-click it for Settings or Quit ([more](#his-icon-in-the-top-bar)) |
+| Yellow / red button on his head | Put away (into his top-bar icon, or minimized) / close |
 | Hover over him | Brings his speech bubble back (it tucks away when idle) |
 | Right-click him | **Settings** (see below) |
 
@@ -87,6 +88,7 @@ Click a line to change it; it applies right away and is remembered (`~/.config/t
 | Theme | light / dark |
 | Hide bubble after | 10 s / 20 s / 1 min / never |
 | Keep on top | on / off (Mini Tux is always on top) |
+| Taskbar icon | on (default) / off: his icon in the top bar, and putting him away hides him there |
 | Keyboard shortcut | Ctrl+Alt+Space / off. Change the keys in GNOME Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → *Tux* |
 | Arch Wiki | off (default) / on: optional offline add-on, downloaded on request; can be deleted again |
 
@@ -97,6 +99,19 @@ gets wider until a command of up to 44 characters fits on one line (most of his 
 shorter), and taller when there's more text, so the text never has to shrink. Tux himself stays
 put: the box grows beside him, picks his other side if there's no room, and shrinks back when he
 goes idle.
+
+### His icon in the top bar
+
+While Tux is open, a small penguin sits in the top bar, next to the clock and battery icons. Click it to
+call him up, click again to put him away; right-click it for **Show / hide Tux**, **Settings…**
+and **Quit Tux**. Putting him away (the yellow button, the icon or the keyboard shortcut) then
+hides him completely: no window and no dock entry, just the icon. He comes back in the same spot.
+
+Ubuntu shows these icons out of the box (its *Ubuntu AppIndicators* extension). KDE, XFCE,
+Cinnamon, MATE and Budgie do too. Plain GNOME (Fedora, Debian) needs the
+[AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/)
+extension; without it Tux just minimizes as before. Turn the icon off in
+Settings → More settings → *Taskbar icon*.
 
 **The keyboard shortcut** is a GNOME custom shortcut that runs `tux.py --toggle`. Tux never
 takes keys that something else already uses: if Ctrl+Alt+Space is taken, he says by what and
