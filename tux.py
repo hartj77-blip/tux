@@ -28,6 +28,7 @@ import cairo
 import gi
 
 from knowledge import Library, best_window, have_arch  # Tux's offline Linux library
+from explain import NO_HELP, as_text, breakdown, looks_like_command, strip_ask  # "what would this do?"
 
 # software rendering: ~half the RAM of GTK's GL renderer and leaves the GPU alone
 os.environ.setdefault("GSK_RENDERER", "cairo")
@@ -96,6 +97,22 @@ FEWSHOT = [
      "Copy the error and click me for an exact fix."),
     ("tell me a joke", "I only know Linux stuff!"),
 ]
+# "what would this command do?": one plain sentence on top of the docs breakdown
+EXPLAIN_PROMPT = (
+    "You are Tux, a Linux helper. The user shows a shell command they have NOT run. Say what "
+    "it would do in ONE short plain sentence (at most 18 words). No code block, don't repeat "
+    "the command, no advice. Use the Parts list."
+)
+EXPLAIN_FEWSHOT = [
+    ("du -sh * | sort -h\n\nParts:\n- du: estimate file space usage\n- -s: display only a total "
+     "for each argument\n- -h: print sizes in human readable format\n- | sends that output into\n"
+     "- sort: sort lines of text files\n- -h: compare human readable numbers",
+     "Lists the size of everything in this folder, smallest to biggest."),
+    ("rm -rf build\n\nParts:\n- rm: remove files or directories\n- -r: remove directories and "
+     "their contents recursively\n- -f: ignore nonexistent files, never prompt",
+     "Deletes the build folder and everything in it, without asking."),
+]
+EXPLAIN_ASK = re.compile(r"\b(explain|what|whats|safe|mean|means|do|does|break ?down)\b", re.I)
 # questions that point at something: "why did that fail", "undo it", "explain this"
 REFERS = re.compile(r"\b(this|that|it|these|those|last|previous|just|above|error|failed|"
                     r"fail|wrong|why|explain|mean|means|undo|again|fix)\b", re.I)
@@ -866,7 +883,7 @@ class Knowledge:
                     self.notes.append((cmd.strip(), desc.strip(), words(cmd + " " + desc)))
         except OSError:
             pass
-        self.help, self.man, self.man_names = [], [], set()
+        self.help, self.man, self.man_names, self.summaries = [], [], set(), {}
         self.lib = Library()  # offline man pages / tldr / Arch Wiki (knowledge.py)
         try:
             idx = json.load(open(INDEX))
@@ -876,6 +893,7 @@ class Knowledge:
                 self.help.append(p)
             self.man = [(n, d, words(d)) for n, d in idx["man"]]
             self.man_names = {n.lower() for n, _, _ in self.man}
+            self.summaries = {n: d for n, d in idx["man"]}
             df = {}
             for p in self.help:
                 for w in p["tw"] | p["dw"]:
@@ -965,10 +983,6 @@ COMMON_WORDS = set("file files time date free test install link more less last w
                    "display help info man open print read sleep stat true false yes see look "
                    "line lines size list show set run start stop update power sound keyboard "
                    "mouse network printer disk dir env id w from at as cd col tr wall".split())
-# never run these, even with --help
-NO_HELP = set("reboot shutdown poweroff halt init telinit rm dd shred wipefs fdisk sfdisk cfdisk "
-              "parted gparted kill killall pkill sudo su login passwd yes xdg-open logout "
-              "gnome-session-quit mkswap swapoff swapon format reset".split())
 REFS_MAX = 700    # characters of reference material per question (keeps answers quick)
 # Feed library snippets to the model? Measured on the 1.5B model: answers were no better on
 # average (some worse, ~2 s slower to start), so the library is used for instant tldr
@@ -2262,6 +2276,7 @@ class Tux(Gtk.ApplicationWindow):
         clip, self.clip = self.clip, None
         if not q and not clip:
             return
+        asked = q
         refers = bool(REFERS.search(q)) or not q
         if clip and not refers:
             clip = None  # you asked about something else: leave the clipboard out of it
@@ -2272,6 +2287,11 @@ class Tux(Gtk.ApplicationWindow):
         self.gen += 1
         if self.idle_src:
             GLib.source_remove(self.idle_src); self.idle_src = None
+        cmd = self.command_in(asked, clip)
+        if cmd:  # "what would this command do?": a breakdown from the docs; it's never run
+            self.say("reading the docs…")
+            threading.Thread(target=self.explain_flow, args=(cmd, self.gen), daemon=True).start()
+            return
         if ON_TOP_WORDS.search(q) and not clip:  # "stay on top" / "sit on my dock"
             self.on_top_offer()
             return
@@ -2306,6 +2326,103 @@ class Tux(Gtk.ApplicationWindow):
         threading.Thread(target=self.ask, args=(q, self.gen, hp, mans, note, clip, recent),
                          daemon=True).start()
 
+    def command_in(self, q, clip):
+        """The shell command you want explained, or None.
+
+        A command typed or pasted on its own ("tar -xzf a.tgz"), asked about ("what does
+        `ls -la` do?"), or copied and then Enter / "what does this do?"."""
+        if clip and (not q or (EXPLAIN_ASK.search(q) and not re.search(
+                r"\b(why|fail|failed|error|fix|wrong)\b", q, re.I))):
+            c = clip.strip()
+            c = re.sub(r"^\$\s+", "", c)
+            if looks_like_command(c, self.kb.man_names, explicit=True):
+                return c
+        if not q:
+            return None
+        c, explicit = strip_ask(q)
+        if explicit and not looks_like_command(c, self.kb.man_names, explicit=True):
+            return None
+        return c if looks_like_command(c, self.kb.man_names, explicit=explicit) else None
+
+    def explain_flow(self, cmd, gen):
+        """Worker thread: break the command down from this machine's docs, then let the model
+        add a one-line summary on top. Nothing is ever run."""
+        def show(text):
+            if gen == self.gen:
+                GLib.idle_add(self.say, text)
+
+        try:
+            b = breakdown(cmd, self.kb.lib, self.kb.summaries)
+        except Exception as e:  # odd input shouldn't take Tux down
+            show(f"Couldn't break that down: {e}")
+            return
+        shown = cmd if len(cmd) <= 40 else cmd[:39] + "…"
+        head = f"What `{shown}` would do:"
+        body = as_text(b) + "\n(Not run: I only read the docs.)"
+        if not (os.path.exists(MODEL) and os.path.exists(SERVER_BIN)):
+            show(head + "\n" + body)
+            return
+        show(head + "\nthinking…\n" + body)
+        if not self.brain.ensure(lambda m: None):
+            show(head + "\n" + body)
+            return
+        parts = "\n".join("- " + l.replace("`", "") for l in b["lines"])
+        msgs = [{"role": "system", "content": EXPLAIN_PROMPT}]
+        for uq, ua in EXPLAIN_FEWSHOT:
+            msgs += [{"role": "user", "content": uq}, {"role": "assistant", "content": ua}]
+        msgs.append({"role": "user", "content": f"{cmd}\n\nParts:\n{parts}"})
+
+        def tidy(t):
+            t = re.sub(r"```.*", "", t, flags=re.S).strip()
+            return t.split("\n")[0].strip() if t else ""
+
+        try:
+            out = self.chat(msgs, 50, gen, lambda t: show(head + "\n" + (tidy(t) or "thinking…")
+                                                           + "\n" + body))
+        except Exception:
+            out = ""
+        if out is None:  # you asked something else meanwhile
+            return
+        summary = tidy(out)
+        if "only know Linux" in summary:
+            summary = ""
+        show(head + ("\n" + summary if summary else "") + "\n" + body)
+        GLib.idle_add(self.arm_idle_timer, gen)
+
+    def chat(self, msgs, max_tokens, gen, on_text):
+        """Stream an answer from the local model; on_text(text so far) ~20×/s.
+        Returns the whole text, or None if a newer question took over. Raises on errors."""
+        body = json.dumps({"messages": msgs, "stream": True, "max_tokens": max_tokens,
+                           "temperature": 0.2, "cache_prompt": True}).encode()
+        req = urllib.request.Request(URL + "/v1/chat/completions", body,
+                                     {"Content-Type": "application/json"})
+        out = ""
+        self.brain.req_lock.acquire()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                last = 0.0
+                for raw in r:
+                    if gen != self.gen:
+                        return None
+                    line = raw.decode("utf-8", "ignore").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(data)["choices"][0]["delta"].get("content") or ""
+                    except (ValueError, KeyError, IndexError):
+                        continue
+                    out += delta
+                    now = time.monotonic()
+                    if now - last > 0.05:  # cap redraws at ~20/s
+                        last = now
+                        on_text(out)
+        finally:
+            self.brain.req_lock.release()
+        return out
+
     def install_flow(self, q, gen, verb, name):
         """Worker thread: answer from apt/snap if we can, otherwise ask the model."""
         try:
@@ -2337,41 +2454,16 @@ class Tux(Gtk.ApplicationWindow):
         lib_refs, link = library_refs(self.kb.lib, self.kb.man_names, q)
         msgs = build_messages(q, self.history, hp, mans, note, clip, recent,
                               lib_refs if USE_LIBRARY_IN_PROMPT else None)
-        body = json.dumps({"messages": msgs, "stream": True, "max_tokens": MAX_TOKENS + (40 if clip or recent else 0),
-                           "temperature": 0.2, "cache_prompt": True}).encode()
-        req = urllib.request.Request(URL + "/v1/chat/completions", body,
-                                     {"Content-Type": "application/json"})
-        out = ""
         footer = f"\n📖 {hp['title']} ›" if hp else ""
         if not hp and link and link[1].startswith("file://"):  # Arch Wiki page (if it's on)
             footer, self.help_uri = f"\n📖 {link[0]} ›", link[1]
-        self.brain.req_lock.acquire()
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                last = 0.0
-                for raw in r:
-                    if gen != self.gen:
-                        return
-                    line = raw.decode("utf-8", "ignore").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        delta = json.loads(data)["choices"][0]["delta"].get("content") or ""
-                    except (ValueError, KeyError, IndexError):
-                        continue
-                    out += delta
-                    now = time.monotonic()
-                    if now - last > 0.05:  # cap redraws at ~20/s
-                        last = now
-                        status(out)
+            out = self.chat(msgs, MAX_TOKENS + (40 if clip or recent else 0), gen, status)
         except Exception as e:
             status(f"Oops, my brain hiccuped: {e}")
             return
-        finally:
-            self.brain.req_lock.release()
+        if out is None:
+            return
         out = out.strip()
         if recent and "only know Linux" in out:
             # the model can't see command output; be straight about it instead of refusing
@@ -2509,5 +2601,8 @@ def snapshot(win, path):
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--shortcut"]:  # set up / remove the keyboard shortcut, then exit
         sys.exit(shortcut_cli(sys.argv[2:]))
+    if sys.argv[1:2] == ["--explain"]:  # what would this command do? (never runs it)
+        import explain
+        sys.exit(explain.main(sys.argv[2:]))
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     sys.exit(App().run(sys.argv))
