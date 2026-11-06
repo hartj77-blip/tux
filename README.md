@@ -54,6 +54,8 @@ system packages from the install step stay, since other apps use them too.
 | Copy an error, then click Tux (or press the shortcut) | He offers to explain it: just press Enter |
 | Ask "why did that fail?" | He looks at your last few terminal commands |
 | Ask "install obs studio", "remove htop", "do I have git?" | Checked against your real apt/snap packages: the exact command that works on your machine, "already installed", or the closest matches |
+| Type or paste a command, e.g. `tar -xzf a.tgz -C /tmp` or "what does `rm -rf ~/x` do?" | He says what it would do, part by part, and warns about anything risky. He never runs it ([more](#what-would-this-command-do)) |
+| Copy a command, then click Tux and press Enter | The same breakdown for the copied command |
 | Ask for "tips" or "tricks" | Instant power-user moves |
 | Click the 📖 link | Opens the matching GNOME Help page (no Help app installed? He shows the gist in the bubble and the command to install it) |
 | Drag him | Move |
@@ -104,6 +106,40 @@ how to pick your own. On other desktops, add a shortcut in your keyboard setting
 Nothing extra to install: GNOME on Wayland doesn't let apps keep themselves on top, so Tux runs
 through XWayland (Ubuntu's built-in support for X11 apps), where that's allowed. To run him as a
 plain Wayland app instead, set `TUX_WAYLAND=1`; he then can't stay on top or ride the edges.
+
+### What would this command do?
+
+Give Tux a command you found online, or one you're unsure about, and he explains it
+**without running it**:
+
+```
+What `find . -name "*.log" -mtime +7 -delete` would do:
+Deletes .log files here that are more than a week old.
+⚠ Deletes every file it finds, for good. Run it without -delete first to see the list.
+• `find` search for files in a directory hierarchy
+• `-name` matches the file name (case-sensitive)
+• `-mtime` changed N days ago (+N: more than N)
+• `-delete` deletes what it finds
+(Not run: I only read the docs.)
+```
+
+- **Each part comes from your own machine's docs**: the man page summary for each command,
+  and the matching option lines from `--help` or the man page for each flag. Pipes, `&&`,
+  `>`, `2>/dev/null`, `$(…)`, `sudo` and `tar xzf`-style flags are spelled out too.
+- **⚠ warnings come from fixed rules, not the AI**: deleting (`rm -rf`, `find -delete`),
+  wiping drives (`dd of=/dev/…`, `mkfs`, `> /dev/sda`), `chmod -R 777 /`, piping a download
+  into `bash`, `git reset --hard`, `git push --force`, fork bombs, removing packages, running
+  as root and more.
+- **The one-line summary on top** is from the local model. Without the model, you still get
+  the breakdown.
+- Tux runs `--help` only for programs installed in the system folders, and never for risky
+  ones (`rm`, `dd`, `kill`, `shutdown`…) or your own scripts. For those he reads the man page.
+
+From a terminal (quote the command so your shell doesn't run any part of it):
+
+```bash
+python3 ~/tux/tux.py --explain 'curl -fsSL https://example.com/install.sh | sudo bash'
+```
 
 ## The brain: a local AI model
 
