@@ -65,15 +65,18 @@ system packages from the install step stay, since other apps use them too.
 | Hover over him | Brings his speech bubble back (it tucks away when idle) |
 | Right-click him | **Settings** (see below) |
 
-### Two ways to have him around
+### Three ways to have him around
 
-| | **Free Tux** (default) | **Mini Tux** (lowest profile) |
-|---|---|---|
-| Size | Resizable | Tiny penguin (44 px) and a compact text box |
-| His box | Grows to fit the answer, then shrinks back | Grows to fit the answer, then shrinks back |
-| Moving | Drag anywhere | Drag him and he slides along the screen edges |
-| Asking | Click his belly or just type | Click him or just type |
-| On top of other windows | Optional (Settings → *Keep on top*) | Always, on every workspace |
+| | **Free Tux** (default) | **Mini Tux** (lowest profile) | **Mini Tux in the top bar** (out of sight) |
+|---|---|---|---|
+| Size | Resizable | Tiny penguin (44 px) and a compact text box | Same as Mini Tux, when he's down |
+| His box | Grows to fit the answer, then shrinks back | Grows to fit the answer, then shrinks back | Grows to fit the answer, then shrinks back |
+| Moving | Drag anywhere | Drag him and he slides along the screen edges | Drops down just under his top-bar icon. Drag him off the top to make him plain Mini Tux |
+| Asking | Click his belly or just type | Click him or just type | Click his icon or press the shortcut, then type |
+| When you're done | Stays put | Stays put | Pops back up into the top bar when his bubble would tuck away |
+| On top of other windows | Optional (Settings → *Keep on top*) | Always, on every workspace | Always, on every workspace |
+
+The top-bar mode needs a top bar that shows tray icons (see [below](#his-icon-in-the-top-bar)).
 
 ### Settings (right-click Tux)
 
@@ -81,7 +84,7 @@ Click a line to change it; it applies right away and is remembered (`~/.config/t
 
 | Setting | Choices |
 |---|---|
-| Mode | Free Tux / Mini Tux |
+| Mode | Free Tux / Mini Tux / Mini Tux in the top bar |
 | Bubble | right / left / above / below Tux (Mini Tux flips it if it would point or run off-screen) |
 | See-through | solid / a little / half / glass (text stays solid) |
 | Text size | small / normal / large |
@@ -106,6 +109,11 @@ While Tux is open, a small penguin sits in the top bar, next to the clock and ba
 call him up, click again to put him away; right-click it for **Show / hide Tux**, **Settings…**
 and **Quit Tux**. Putting him away (the yellow button, the icon or the keyboard shortcut) then
 hides him completely: no window and no dock entry, just the icon. He comes back in the same spot.
+
+For the lowest profile, pick Settings → Mode → **Mini Tux in the top bar**. He then lives in
+the icon: click it (or press the shortcut) and Mini Tux drops down just under the bar, right
+below the icon; when you're done and his bubble would tuck away, he pops back up. (GNOME's
+top bar itself only holds icons and extensions, so the icon is his home up there.)
 
 Ubuntu shows these icons out of the box (its *Ubuntu AppIndicators* extension). KDE, XFCE,
 Cinnamon, MATE and Budgie do too. Plain GNOME (Fedora, Debian) needs the

@@ -79,7 +79,8 @@ def icon_pixmaps(png, sizes=(22, 32, 48)):
 
 
 class Tray:
-    """menu: [(label, callback) or None for a line]; on_click: left click on the icon.
+    """menu: [(label, callback) or None for a line]; on_click(x, y): left click on the icon,
+    at that screen spot (0, 0 if the tray host doesn't say).
     on_change(shown): called when a tray host appears or goes away (True = icon is up)."""
 
     def __init__(self, icon_png, on_click, menu, on_change=None, title="Tux"):
@@ -162,7 +163,8 @@ class Tray:
 
     def _item_call(self, conn, sender, path, iface, method, params, inv):
         if method in ("Activate", "SecondaryActivate"):
-            GLib.idle_add(lambda: (self.on_click(), False)[-1])
+            x, y = params.unpack()  # where you clicked (0, 0 if the tray doesn't say)
+            GLib.idle_add(lambda: (self.on_click(x, y), False)[-1])
         inv.return_value(None)
 
     # ---- its right-click menu (ids: 1.. in menu order)
