@@ -1,8 +1,8 @@
 # Tux
 
-A tiny, fully local Linux helper. Tux is a little penguin who lives in your top bar.
-Click his icon (or press Ctrl+Alt+Space), ask anything about Linux, and he drops down
-with the exact command in a speech bubble, then pops back up. No cloud, no account.
+A tiny, fully local Linux helper. Tux is a penguin-shaped desktop window with a
+speech bubble. Ask him anything about Linux and he answers in a line or two with
+the exact command, right on your machine. No cloud, no account.
 
 His brain is a small AI model that runs on your own CPU: **Qwen2.5-Coder 1.5B**, run by
 **llama.cpp**. 
@@ -47,8 +47,8 @@ system packages from the install step stay, since other apps use them too.
 
 | Do this | What happens |
 |---|---|
-| Click his icon in the top bar, or press **Ctrl+Alt+Space** from any app | Tux drops down just under the bar, ready to type. Do it again to send him back up, and you're back where you were |
-| Type a question, press Enter | He answers in the bubble. Click him to type again |
+| Press **Ctrl+Alt+Space**, from any app | Tux pops up ready to type. Press it again to put him away, and you're back where you were |
+| Click his belly or just start typing | Ask a question, press Enter |
 | Click a command in the bubble | Copied to your clipboard (Tux never runs anything) |
 | `Ctrl+C` / right-click the bubble | Copy the first command / the whole answer |
 | Copy an error, then click Tux (or press the shortcut) | He offers to explain it: just press Enter |
@@ -58,48 +58,90 @@ system packages from the install step stay, since other apps use them too.
 | Copy a command, then click Tux and press Enter | The same breakdown for the copied command |
 | Ask for "tips" or "tricks" | Instant power-user moves |
 | Click the 📖 link | Opens the matching GNOME Help page (no Help app installed? He shows the gist in the bubble and the command to install it) |
-| Drag him left or right | Moves him along under the top bar (he drops down there from now on) |
-| Leave him be | When his bubble would tuck away, he pops back up into the top bar |
-| Right-click his top-bar icon | **Show / hide Tux**, **Settings…**, **Quit Tux** |
-| Yellow / red button in the bubble | Send him back up / close |
-| Hover over him | Keeps him down and his bubble showing |
+| Drag him | Move |
+| Drag the lines on his right foot / `Ctrl+scroll` | Resize |
+| Click his icon in the top bar | Call him up / put him away. Right-click it for Settings or Quit ([more](#his-icon-in-the-top-bar)) |
+| Yellow / red button on his head | Put away (into his top-bar icon, or minimized) / close |
+| Hover over him | Brings his speech bubble back (it tucks away when idle) |
 | Right-click him | **Settings** (see below) |
+
+### Three ways to have him around
+
+| | **Free Tux** (default) | **Mini Tux** (lowest profile) | **Mini Tux in the top bar** (out of sight) |
+|---|---|---|---|
+| Size | Resizable | Tiny penguin (44 px) and a compact text box | Same as Mini Tux, when he's down |
+| His box | Grows to fit the answer, then shrinks back | Grows to fit the answer, then shrinks back | Grows to fit the answer, then shrinks back |
+| Moving | Drag anywhere | Drag him and he slides along the screen edges | Drops down just under his top-bar icon. Drag him off the top to make him plain Mini Tux |
+| Asking | Click his belly or just type | Click him or just type | Click his icon or press the shortcut, then type |
+| When you're done | Stays put | Stays put | Pops back up into the top bar when his bubble would tuck away |
+| On top of other windows | Optional (Settings → *Keep on top*) | Always, on every workspace | Always, on every workspace |
+
+The top-bar mode needs a top bar that shows tray icons (see [below](#his-icon-in-the-top-bar)).
 
 ### Settings (right-click Tux)
 
-Click a line to change it; it applies right away and is remembered (`~/.config/tux/settings.json`).
+Four short pages. Click a line to change it; it applies right away and is remembered
+(`~/.config/tux/settings.json`).
 
-| Setting | Choices |
-|---|---|
-| Bubble | right / left / below Tux (flipped if it would run off the screen) |
-| See-through | solid / a little / half / glass (text stays solid) |
-| Text size | small / normal / large |
-| Theme | light / dark |
-| Hide bubble after | 10 s / 20 s / 1 min / never. This is also when he goes back up into the top bar (1 min gives you time to read a long answer; "never" keeps him down) |
-| Keyboard shortcut | Ctrl+Alt+Space / off. Change the keys in GNOME Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → *Tux* |
-| Arch Wiki | off (default) / on: optional offline add-on, downloaded on request; can be deleted again |
+| Page | Setting | Choices |
+|---|---|---|
+| **Where he lives** | Mode | Free Tux / Mini Tux on the screen edge / Mini Tux in the top bar |
+| | Tux size | small / normal / large (Mini Tux; Free Tux resizes by dragging his foot) |
+| | Bubble | right / left / above / below Tux (flipped if it would point or run off-screen) |
+| | Keep on top | on / off (Mini Tux is always on top) |
+| **Look** | Box width | narrow / normal / wide: how wide his box is when idle, and how long a command fits on one line (34 / 44 / 60 characters) |
+| | Text size | small / normal / large |
+| | See-through | solid / a little / half / glass (text stays solid) |
+| | Theme | light / dark |
+| **Behaviour** | Hide bubble after | 10 s / 20 s / 1 min / never |
+| | Back to the top bar | when his bubble hides / only when I click (top-bar mode) |
+| | When Tux starts | show him / stay in the top-bar icon |
+| | Greeting tip | on / off: a power-user tip when he says hello |
+| | Taskbar icon | on (default) / off: his icon in the top bar, and putting him away hides him there |
+| **Extras** | Keyboard shortcut | Ctrl+Alt+Space / off. Change the keys in GNOME Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → *Tux* |
+| | Arch Wiki | off (default) / on: optional offline add-on, downloaded on request; can be deleted again |
+| | Copy my settings | Copies every setting in plain words, to paste into a message |
+| | Reset everything to defaults | Asks first; your notes stay |
 
-He remembers where along the top bar you put him.
+Asking him to "stay on top" also offers the visible options. He remembers where you left him.
 
 **His box fits the answer.** It stays small while he's idle or you're typing. For an answer it
 gets wider until a command of up to 44 characters fits on one line (most of his commands are
-shorter), and taller when there's more text (up to 320 px, enough for a command breakdown), so
-the text never has to shrink. Tux himself stays put: the box grows beside him, picks his other
-side if there's no room, and shrinks back when he goes idle.
+shorter), and taller when there's more text, so the text never has to shrink. Tux himself stays
+put: the box grows beside him, picks his other side if there's no room, and shrinks back when he
+goes idle.
 
-### His home in the top bar
+### His icon in the top bar
 
-While Tux is open, a small penguin icon sits in the top bar, next to the clock and battery
-icons. Between questions that's all there is of him: no window and no dock entry. Click the
-icon (or press the shortcut) and he drops down just under the bar, right below the icon; when
-you're done he pops back up. (GNOME's top bar itself only holds icons and Shell extensions, so
-an app can't sit inside it: the icon is his home up there.)
+While Tux is open, a small penguin sits in the top bar, next to the clock and battery icons. Click it to
+call him up, click again to put him away; right-click it for **Show / hide Tux**, **Settings…**
+and **Quit Tux**. Putting him away (the yellow button, the icon or the keyboard shortcut) then
+hides him completely: no window and no dock entry, just the icon. He comes back in the same spot.
+
+For the lowest profile, pick Settings → Mode → **Mini Tux in the top bar**. He then lives in
+the icon: click it (or press the shortcut) and Mini Tux drops down just under the bar, right
+below the icon; when you're done and his bubble would tuck away, he pops back up. (GNOME's
+top bar itself only holds icons and extensions, so the icon is his home up there.)
 
 Ubuntu shows these icons out of the box (its *Ubuntu AppIndicators* extension). KDE, XFCE,
 Cinnamon, MATE and Budgie do too. Plain GNOME (Fedora, Debian) needs the
 [AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/)
-extension. Without it Tux stays visible just under the top bar, on top of your windows, and
-Settings tells you how to give him his icon.
+extension; without it Tux just minimizes as before. Turn the icon off in
+Settings → More settings → *Taskbar icon*.
+
+### Trying out layouts (for testers)
+
+Everyone likes Tux living somewhere different, so try a few:
+
+1. Right-click Tux → **Mode**: try all three for a while (Free Tux, Mini Tux on an edge, Mini
+   Tux in the top bar). Drag Mini Tux to the edge you like.
+2. Try **Tux size** (first page) and **Box width** (Look page) until answers are easy to read.
+3. On the **Behaviour** page, pick how long he stays out and whether he starts hidden.
+4. When you've settled, **Extras → Copy my settings** and paste it into a message to whoever
+   asked you to test. It lists every setting, with a `*` on the ones you changed.
+
+From a terminal, the same list: `python3 ~/tux/tux.py --settings`. To start over:
+`python3 ~/tux/tux.py --reset-settings` (with Tux closed), or **Extras → Reset everything to defaults**.
 
 **The keyboard shortcut** is a GNOME custom shortcut that runs `tux.py --toggle`. Tux never
 takes keys that something else already uses: if Ctrl+Alt+Space is taken, he says by what and
@@ -108,8 +150,7 @@ how to pick your own. On other desktops, add a shortcut in your keyboard setting
 
 Nothing extra to install: GNOME on Wayland doesn't let apps keep themselves on top, so Tux runs
 through XWayland (Ubuntu's built-in support for X11 apps), where that's allowed. To run him as a
-plain Wayland app instead, set `TUX_WAYLAND=1`; he then can't stay on top or place himself
-under the bar.
+plain Wayland app instead, set `TUX_WAYLAND=1`; he then can't stay on top or ride the edges.
 
 ### What would this command do?
 
