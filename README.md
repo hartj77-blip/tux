@@ -16,8 +16,9 @@ git clone https://github.com/hartj77-blip/tux.git ~/tux
 cd ~/tux && ./install.sh
 ```
 
-That's it. Open **Tux** from your app grid. The installer needs no sudo. It
-downloads llama.cpp (~25 MB) and the Qwen2.5-Coder 1.5B model (~1 GB), then takes a few minutes.
+That's it. Open **Tux** from your app grid, or press **Ctrl+Alt+Space** from anywhere (the
+installer offers to set up that shortcut). The installer needs no sudo. It downloads llama.cpp
+(~25 MB) and the Qwen2.5-Coder 1.5B model (~1 GB), then takes a few minutes.
 
 **Needs:** x86_64 Linux, `curl`, and Python 3 with GTK4. Stock Ubuntu 22.04+ or Debian 12+ with GNOME
 already has everything. Otherwise:
@@ -38,18 +39,19 @@ model download, so an older system finds out right away instead of after "Done!"
 ~/tux/uninstall.sh
 ```
 
-It closes Tux and removes his app grid entry, his settings and his `~/.bashrc` line (if you
-added it), then asks before deleting the `~/tux` folder with the model. No sudo needed. The
+It closes Tux and removes his app grid entry, his keyboard shortcut, his settings and his
+`~/.bashrc` line (if you added it), then asks before deleting the `~/tux` folder with the model. No sudo needed. The
 system packages from the install step stay, since other apps use them too.
 
 ## Using Tux
 
 | Do this | What happens |
 |---|---|
+| Press **Ctrl+Alt+Space**, from any app | Tux pops up ready to type. Press it again to put him away, and you're back where you were |
 | Click his belly or just start typing | Ask a question, press Enter |
 | Click a command in the bubble | Copied to your clipboard (Tux never runs anything) |
 | `Ctrl+C` / right-click the bubble | Copy the first command / the whole answer |
-| Copy an error, then click Tux | He offers to explain it: just press Enter |
+| Copy an error, then click Tux (or press the shortcut) | He offers to explain it: just press Enter |
 | Ask "why did that fail?" | He looks at your last few terminal commands |
 | Ask "install obs studio", "remove htop", "do I have git?" | Checked against your real apt/snap packages: the exact command that works on your machine, "already installed", or the closest matches |
 | Ask for "tips" or "tricks" | Instant power-user moves |
@@ -64,7 +66,8 @@ system packages from the install step stay, since other apps use them too.
 
 | | **Free Tux** (default) | **Mini Tux** (lowest profile) |
 |---|---|---|
-| Size | Resizable | Tiny penguin (44 px) and a compact text box that grows to fit, then shrinks back |
+| Size | Resizable | Tiny penguin (44 px) and a compact text box |
+| His box | Grows to fit the answer, then shrinks back | Grows to fit the answer, then shrinks back |
 | Moving | Drag anywhere | Drag him and he slides along the screen edges |
 | Asking | Click his belly or just type | Click him or just type |
 | On top of other windows | Optional (Settings → *Keep on top*) | Always, on every workspace |
@@ -76,15 +79,27 @@ Click a line to change it; it applies right away and is remembered (`~/.config/t
 | Setting | Choices |
 |---|---|
 | Mode | Free Tux / Mini Tux |
-| Bubble | right / left / above / below Tux (Mini Tux flips it if it would point off-screen) |
+| Bubble | right / left / above / below Tux (Mini Tux flips it if it would point or run off-screen) |
 | See-through | solid / a little / half / glass (text stays solid) |
 | Text size | small / normal / large |
 | Theme | light / dark |
 | Hide bubble after | 10 s / 20 s / 1 min / never |
 | Keep on top | on / off (Mini Tux is always on top) |
+| Keyboard shortcut | Ctrl+Alt+Space / off. Change the keys in GNOME Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → *Tux* |
 | Arch Wiki | off (default) / on: optional offline add-on, downloaded on request; can be deleted again |
 
 Asking him to "stay on top" also offers the visible options. He remembers where you left him.
+
+**His box fits the answer.** It stays small while he's idle or you're typing. For an answer it
+gets wider until a command of up to 44 characters fits on one line (most of his commands are
+shorter), and taller when there's more text, so the text never has to shrink. Tux himself stays
+put: the box grows beside him, picks his other side if there's no room, and shrinks back when he
+goes idle.
+
+**The keyboard shortcut** is a GNOME custom shortcut that runs `tux.py --toggle`. Tux never
+takes keys that something else already uses: if Ctrl+Alt+Space is taken, he says by what and
+how to pick your own. On other desktops, add a shortcut in your keyboard settings that runs
+`python3 ~/tux/tux.py --toggle`. From a terminal: `python3 ~/tux/tux.py --shortcut on|off|status`.
 
 Nothing extra to install: GNOME on Wayland doesn't let apps keep themselves on top, so Tux runs
 through XWayland (Ubuntu's built-in support for X11 apps), where that's allowed. To run him as a
