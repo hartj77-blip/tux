@@ -112,7 +112,20 @@ apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$apps"
 sed "s|@TUX_DIR@|$TUX_DIR|g" tux.desktop.in > "$apps/tux.desktop"
 
-# 6. optional: save bash history after every command, so Tux can see what you just ran
+# 6. keyboard shortcut that calls Tux from anywhere (a GNOME custom shortcut; never overrides
+#    keys something else already uses). Change or remove it any time: right-click Tux → Settings.
+shortcut=$(python3 tux.py --shortcut status 2>/dev/null || true)
+case "$shortcut" in
+    on*)  python3 tux.py --shortcut on | sed 's/^/  /' || true ;;  # keeps your keys, points it here
+    off)  if [ -t 0 ]; then
+              read -rp "Call Tux from anywhere with Ctrl+Alt+Space (press again to put him away)? [Y/n] " yn
+              [[ "$yn" =~ ^[Nn] ]] || python3 tux.py --shortcut on | sed 's/^/  /' || true
+          fi ;;
+    *)    echo "  Tip: in your desktop's keyboard settings, add a shortcut that runs:"
+          echo "       python3 $TUX_DIR/tux.py --toggle" ;;
+esac
+
+# 7. optional: save bash history after every command, so Tux can see what you just ran
 MARK="# tux: save history after every command"
 if [ -t 0 ] && ! grep -qF "$MARK" ~/.bashrc 2>/dev/null; then
     read -rp "Let Tux see your recent terminal commands (adds one line to ~/.bashrc)? [y/N] " yn
