@@ -621,14 +621,14 @@ ART_H = 486  # height of the Tux picture in pixels; belly etc. are measured on i
 
 
 class Layout:
-    """Where everything goes, in design units. Free Tux scales them to the window size;
-    Mini Tux is drawn 1:1 in a window of exactly DW x DH."""
+    """Where everything goes, in design units. Tux is drawn 1:1 in a window of exactly
+    DW x DH."""
 
     def __init__(self, mode, edge, DW, DH, ART, BUBBLE, TAIL_TIP, ENTRY, BTN_MIN, BTN_CLOSE,
-                 GRIP=None, HOVER=None, TEXT_TOP=0, FONT=12.5, SIDE="right"):
+                 HOVER=None, TEXT_TOP=0, FONT=12.5, SIDE="right"):
         self.mode, self.edge, self.DW, self.DH = mode, edge, DW, DH
         self.ART, self.BUBBLE, self.TAIL_TIP, self.ENTRY = ART, BUBBLE, TAIL_TIP, ENTRY
-        self.BTN_MIN, self.BTN_CLOSE, self.GRIP = BTN_MIN, BTN_CLOSE, GRIP
+        self.BTN_MIN, self.BTN_CLOSE = BTN_MIN, BTN_CLOSE
         self.HOVER, self.TEXT_TOP, self.FONT, self.SIDE = HOVER, TEXT_TOP, FONT, SIDE
 
     @property
@@ -656,7 +656,7 @@ ART_W = 411  # width of the Tux picture
 BUBBLE_SIDES = ("right", "left", "above", "below")   # where the bubble sits, seen from Tux
 
 
-def bubble_layout(mode, edge, side, th, bw, bh, grip=False, font=12.5, valign="bottom",
+def bubble_layout(mode, edge, side, th, bw, bh, font=12.5, valign="bottom",
                   halign="left", btn_r=7):
     """Tux and his speech bubble, the bubble on any side of him. The text box and the
     minimize/close buttons live inside the bubble."""
@@ -685,7 +685,6 @@ def bubble_layout(mode, edge, side, th, bw, bh, grip=False, font=12.5, valign="b
                   TAIL_TIP=tip, ENTRY=(bx + 8, by + bh - 34, bw - 16, 26),
                   BTN_MIN=(bx + bw - 5.4 * btn_r, by + 2 * btn_r, btn_r),
                   BTN_CLOSE=(bx + bw - 2.3 * btn_r, by + 2 * btn_r, btn_r),
-                  GRIP=(ax + tw - 8, ay + th - 8, 9) if grip else None,
                   TEXT_TOP=2 * btn_r, FONT=font, SIDE=side)
 
 
@@ -693,23 +692,9 @@ def bubble_layout(mode, edge, side, th, bw, bh, grip=False, font=12.5, valign="b
 # command this many characters long fits on one line (most of Tux's commands are shorter).
 CMD_FIT = 44
 CMD_PAD = 36   # room around a command line inside the box: margins + its dark background
-FREE_BW = 282       # Free Tux's narrow box, in design units (everything scales with his window)
-FREE_BH_MAX = 270   # ...and the tallest it grows for a long answer
-
-
-def free_layout(side="right", bw=FREE_BW, bh=None):
-    """Free Tux: move and resize anywhere (everything scales with the window)."""
-    bh = bh or (150 if side in ("above", "below") else 172)
-    return bubble_layout("free", None, side, th=150, bw=bw, bh=bh, grip=True)
-
-
-def free_default_size(L):
-    return int(L.DW * 0.88), int(L.DH * 0.88)
-
-
-# Mini Tux: the lowest-profile version, a tiny penguin and a text box that fits its message
+# Mini Tux: a tiny penguin under his top-bar icon, and a text box that fits its message
 MINI_TH, MINI_BW, MINI_FONT = 44, 232, 10.5
-MINI_BH_MIN, MINI_BH_MAX = 58, 230
+MINI_BH_MIN, MINI_BH_MAX = 58, 320   # tall enough for a command breakdown
 OUTWARD = {"bottom": "below", "top": "above", "left": "left", "right": "right"}
 FLIP = {"right": "left", "left": "right", "above": "below", "below": "above"}
 
@@ -752,9 +737,6 @@ def edge_overflow(L, edge, t, wa):
     start, length, size = (wx, ww, L.DW) if edge in ("top", "bottom") else (wy, wh, L.DH)
     pos = start + t * (length - n) - a
     return max(0, start - pos) + max(0, pos + size - (start + length))
-
-
-FREE = free_layout()  # default; the real one follows your settings
 
 
 URL = f"http://127.0.0.1:{PORT}"
@@ -1219,10 +1201,11 @@ class Tux(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Tux")
         self.set_decorated(False)
-        self.settings = load_settings()   # mode, edge, on_top, last free size/position
+        self.settings = load_settings()   # where he sits under the top bar, look, …
+        self.settings["edge"] = "top"     # he always lives just under the top bar
         self.x11 = X11.open() if USE_X11 else None
-        self.L = FREE
-        self.mini_drag = None             # Mini Tux being dragged along the edges
+        self.L = mini_layout("top")
+        self.mini_drag = None             # Tux being dragged along under the top bar
         self.anchored = None              # window size Mini Tux was last put on his edge at
         self.wiki_job = None              # "downloading the Arch Wiki"… while that runs
         self.placed_once = False
@@ -1246,11 +1229,10 @@ class Tux(Gtk.ApplicationWindow):
         self.bubble_hidden = False   # tucked away after HIDE_SECS of nothing happening
         self.last_activity = time.monotonic()
         self.tick_src = GLib.timeout_add_seconds(1, self.tick)
-        self.tray = None             # top-bar icon (Settings → Taskbar icon)
+        self.tray = None             # his top-bar icon: where he lives between questions
         GLib.idle_add(lambda: (self.tray_apply(), False)[-1])
         self.boxes = []              # [(x, y, w, h, kind, payload)] clickable bits of the bubble
         self.region_key = None
-        self.free_home = None        # Free Tux's size and spot with the narrow box, while it's wide
 
         css = Gtk.CssProvider()
         style = """
@@ -1286,7 +1268,7 @@ class Tux(Gtk.ApplicationWindow):
         rclick = Gtk.GestureClick(button=3)  # right-click the bubble: copy the whole answer
         rclick.connect("pressed", self.on_rclick)  # bubble: copy answer; Tux: options
         self.area.add_controller(rclick)
-        drag = Gtk.GestureDrag(button=1)    # Mini Tux: slide along the screen edges
+        drag = Gtk.GestureDrag(button=1)    # slide him along under the top bar
         drag.connect("drag-update", self.on_drag_update)
         drag.connect("drag-end", self.on_drag_end)
         self.area.add_controller(drag)
@@ -1298,10 +1280,6 @@ class Tux(Gtk.ApplicationWindow):
         motion.connect("leave", self.on_leave)
         self.area.add_controller(motion)
 
-        scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-        scroll.connect("scroll", self.on_scroll)
-        self.add_controller(scroll)
-
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self.on_key)
         self.add_controller(keys)
@@ -1309,7 +1287,7 @@ class Tux(Gtk.ApplicationWindow):
         self.connect("close-request", self.on_close)
         # once he's on screen: stay on top / take his spot (XWayland only)
         self.connect("map", lambda *_: GLib.timeout_add(150, self.place_window))
-        # Free Tux's box can only fit its text once his window is up (it sizes the window)
+        # his box can only fit its text once his window is up (it sizes the window)
         self.connect("map", lambda *_: GLib.timeout_add(250, lambda: self.fit_bubble() or False))
         if os.environ.get("TUX_TEST") and self.x11:  # test windows never take your keyboard
             self.connect("realize", lambda *_: self.no_focus_on_map())
@@ -1357,9 +1335,7 @@ class Tux(Gtk.ApplicationWindow):
         for y, x0, x1 in self.art_runs:
             region.union(R(int(ox + ax * s + x0 * k), int(oy + ay * s + y * k),
                            int((x1 - x0) * k) + 1, int(2 * k) + 1))
-        circles = [c for c in (self.L.GRIP,) if c]
-        if self.buttons_on():
-            circles += [self.L.BTN_MIN, self.L.BTN_CLOSE]
+        circles = [self.L.BTN_MIN, self.L.BTN_CLOSE] if self.buttons_on() else []
         for cx, cy, r in circles:
             r += 3
             region.union(R(int(ox + (cx - r) * s), int(oy + (cy - r) * s),
@@ -1392,7 +1368,7 @@ class Tux(Gtk.ApplicationWindow):
         self.boxes = []
         if self.bubble_on():
             self.draw_bubble(cr, s, ox, oy)
-        if self.L.GRIP or self.buttons_on():  # buttons in the bubble's corner, grip on his foot
+        if self.buttons_on():  # buttons in the bubble's corner
             cr.save()
             cr.translate(ox, oy)
             cr.scale(s, s)
@@ -1400,13 +1376,13 @@ class Tux(Gtk.ApplicationWindow):
             cr.restore()
         self.place_entry(s, ox, oy)
         self.update_input_region()
-        # Mini Tux: once the window has really changed size, put him back on his edge
-        if self.L.mode == "mini" and self.x11 and (w, h) != self.anchored and not self.mini_drag:
+        # once the window has really changed size, put him back in his spot
+        if self.x11 and (w, h) != self.anchored and not self.mini_drag:
             self.anchored = (w, h)
             GLib.idle_add(self.anchor_mini)
 
     def anchor_mini(self):
-        if self.L.mode == "mini" and self.x11 and self.get_mapped() and not self.mini_drag:
+        if self.x11 and self.get_mapped() and not self.mini_drag:
             size = (self.get_width(), self.get_height())
             self.x11.move(self.xid(), *self.edge_pos(self.L.edge, self.settings.get("t", 0.95),
                                                      size=size))
@@ -1435,12 +1411,6 @@ class Tux(Gtk.ApplicationWindow):
             else:
                 cr.move_to(cx - k, cy - k); cr.line_to(cx + k, cy + k)
                 cr.move_to(cx + k, cy - k); cr.line_to(cx - k, cy + k)
-            cr.stroke()
-        if self.L.GRIP:  # resize grip: three little lines on the right foot (Free Tux only)
-            gx, gy, _ = self.L.GRIP
-            cr.set_source_rgba(0.35, 0.2, 0, 0.7); cr.set_line_width(1.6)
-            for d in (4, 8, 12):
-                cr.move_to(gx + 6 - d, gy + 6); cr.line_to(gx + 6, gy + 6 - d)
             cr.stroke()
 
     def bubble_path(self, cr, X, Y, W, H, R, s, ox, oy):
@@ -1632,9 +1602,6 @@ class Tux(Gtk.ApplicationWindow):
             self.close(); return
         if self.buttons_on() and self.inside_circle(dx, dy, self.L.BTN_MIN):
             self.tuck_away(); return
-        if self.L.GRIP and self.inside_circle(dx, dy, self.L.GRIP, 4):
-            self.free_home = None   # you're resizing him: that's his new size
-            surf.begin_resize(Gdk.SurfaceEdge.SOUTH_EAST, dev, btn, x, y, t); return
         for bx, by, bw, bh, kind, payload in self.boxes:
             if bx <= x <= bx + bw and by <= y <= by + bh:
                 if kind == "cmd":
@@ -1653,19 +1620,12 @@ class Tux(Gtk.ApplicationWindow):
             if not self.history:  # still on the tip screen: show another tip
                 self.say(self.greeting())
             return
-        if self.L.mode == "mini":
-            if self.x11:  # Mini Tux: click = ask, drag = slide along the screen edges
-                self.mini_drag = {"start": self.x11.pointer(), "moved": False}
-            else:         # no XWayland: can't place ourselves, let GNOME move him
-                surf.begin_move(dev, btn, x, y, t)
-            return
-        cx, cy, rx, ry = self.L.BELLY
-        if math.hypot((dx - cx) / rx, (dy - cy) / ry) <= 1 and n_press == 1:
-            self.show_entry(); return
-        self.free_home = None   # you're moving him: wherever he lands is his new spot
-        surf.begin_move(dev, btn, x, y, t)
+        if self.x11:  # click = ask, drag = slide him along under the top bar
+            self.mini_drag = {"start": self.x11.pointer(), "moved": False}
+        else:         # no XWayland: can't place ourselves, let GNOME move him
+            surf.begin_move(dev, btn, x, y, t)
 
-    # ---- Mini Tux rides the screen edges
+    # ---- drag him left/right along under the top bar
     def on_drag_update(self, *_):
         d = self.mini_drag
         if not d or not self.x11:
@@ -1677,30 +1637,19 @@ class Tux(Gtk.ApplicationWindow):
             d["moved"] = True
             d["wa"] = self.x11.workarea()
         wx, wy, ww, wh = d["wa"]
-        # the edge nearest the pointer, and how far along it (Tux's middle under the pointer)
-        dist = {"left": px - wx, "right": wx + ww - px, "top": py - wy, "bottom": wy + wh - py}
-        edge = min(dist, key=dist.get)
-        tw = MINI_TH * ART_W / ART_H
-        if edge in ("top", "bottom"):
-            t = (px - tw / 2 - wx) / max(1, ww - tw)
-        else:
-            t = (py - MINI_TH / 2 - wy) / max(1, wh - MINI_TH)
-        self.settings["edge"], self.settings["t"] = edge, min(1.0, max(0.0, t))
+        tw = MINI_TH * ART_W / ART_H          # his middle follows the pointer
+        self.settings["t"] = min(1.0, max(0.0, (px - tw / 2 - wx) / max(1, ww - tw)))
         self.set_layout(self.mini_shape(self.L.BUBBLE[3], self.L.BUBBLE[2], d["wa"]))
-        self.x11.move(self.xid(), *self.edge_pos(edge, self.settings["t"], d["wa"]))
+        self.x11.move(self.xid(), *self.edge_pos("top", self.settings["t"], d["wa"]))
 
     def on_drag_end(self, *_):
         d, self.mini_drag = self.mini_drag, None
         if not d:
             return
         if d["moved"]:
-            if self.settings.get("in_bar") and self.settings.get("edge") != "top":
-                self.settings["in_bar"] = False
-                self.say("Out of the top bar: I'll stay on this edge now. "
-                         "Settings → Mode puts me back up there.")
             save_settings(self.settings)
         else:
-            self.show_entry()  # just a click on Mini Tux: ask him something
+            self.show_entry()  # just a click on him: ask him something
 
     def edge_pos(self, edge, t, wa=None, size=None):
         """Where Mini Tux's window goes. t (0..1 along the edge) is where Tux himself sits,
@@ -1721,33 +1670,23 @@ class Tux(Gtk.ApplicationWindow):
             return self.get_surface().get_xid()
 
     # ---- settings (right-click) values, with defaults
-    DEFAULTS = {"mode": "free", "bubble_side": "right", "opacity": 0.97, "text_size": 1.0,
-                "theme": "light", "hide_secs": HIDE_SECS, "on_top": False, "arch_wiki": False,
-                "tray": True}
+    DEFAULTS = {"bubble_side": "right", "opacity": 0.97, "text_size": 1.0,
+                "theme": "light", "hide_secs": HIDE_SECS, "arch_wiki": False}
 
     def opt(self, key):
         return self.settings.get(key, self.DEFAULTS[key])
 
-    # ---- the two modes
+    # ---- his layout
     def apply_mode(self):
-        self.free_home = None
-        if self.opt("mode") == "mini":
-            self.set_layout(self.mini_shape())
-            self.fit_bubble(force=True)
-        else:
-            self.L = free_layout(self.opt("bubble_side"))
-            w, h = self.settings.get("free_size") or free_default_size(self.L)
-            aspect = self.L.DW / self.L.DH
-            if not h or abs(w / h - aspect) > 0.25 * aspect:  # saved from another layout
-                w, h = free_default_size(self.L)
-            self.set_default_size(int(w), int(h))
+        self.set_layout(self.mini_shape())
+        self.fit_bubble(force=True)
         self.region_key = None
         self.area.queue_draw()
         if self.get_mapped():
             GLib.timeout_add(150, self.place_window)
 
     def set_layout(self, L):
-        """Switch to a new Mini Tux layout and resize his window to match."""
+        """Switch to a new layout and resize his window to match."""
         if (L.DW, L.DH, L.BUBBLE, L.SIDE, L.ART) != (self.L.DW, self.L.DH, self.L.BUBBLE,
                                                       self.L.SIDE, self.L.ART):
             self.region_key = None
@@ -1756,10 +1695,10 @@ class Tux(Gtk.ApplicationWindow):
         self.set_default_size(math.ceil(L.DW), math.ceil(L.DH))
 
     def mini_shape(self, bh=MINI_BH_MIN, bw=MINI_BW, wa=None):
-        """Mini Tux's layout at this box size. The box goes on the side you picked, unless
-        it wouldn't fit there at its biggest, where Tux sits; then it goes the other way,
-        so Tux never has to move for it."""
-        edge = self.settings.get("edge", "bottom")
+        """His layout at this box size. The box goes on the side you picked, unless it
+        wouldn't fit there at its biggest, where Tux sits; then it goes the other way, so
+        Tux never has to move for it."""
+        edge = "top"
         variants = mini_variants(edge, self.opt("bubble_side"))
         if self.x11:
             wa = wa or self.x11.workarea()
@@ -1770,8 +1709,8 @@ class Tux(Gtk.ApplicationWindow):
         return mini_layout(edge, variants[0][0], bh, bw, *variants[0][1:])
 
     def measure(self, s=1.0, font=None):
-        """Text measuring at the size Tux draws it (s = Free Tux's scale): a context, the
-        font size and the answer's blocks."""
+        """Text measuring at the size Tux draws it: a context, the font size and the
+        answer's blocks."""
         cr = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
         blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
         return cr, (font or self.L.FONT) * self.opt("text_size") * s, blocks
@@ -1792,9 +1731,7 @@ class Tux(Gtk.ApplicationWindow):
         """Box size (width, height) for what Tux is saying. Narrow and short when he's idle;
         wider when a command would wrap (up to widest_box()), and taller when there's more
         text, so it never has to shrink."""
-        mini = self.L.mode == "mini"
-        narrow, short, tall = ((MINI_BW, MINI_BH_MIN, MINI_BH_MAX) if mini else
-                               (FREE_BW, free_layout(self.L.SIDE).BUBBLE[3], FREE_BH_MAX))
+        narrow, short, tall = MINI_BW, MINI_BH_MIN, MINI_BH_MAX
         if not self.bubble_on():
             return narrow, short
         cr, size, blocks = self.measure(s)
@@ -1820,9 +1757,6 @@ class Tux(Gtk.ApplicationWindow):
     def fit_bubble(self, force=False):
         """The box fits its message: wider for a long command, taller for more text. It
         shrinks back when Tux goes idle."""
-        if self.L.mode == "free":
-            self.fit_free(force)
-            return
         bw, bh = self.wanted_box()
         old = self.L.BUBBLE
         if not force and abs(bh - old[3]) < 4 and abs(bw - old[2]) < 4:
@@ -1831,118 +1765,20 @@ class Tux(Gtk.ApplicationWindow):
         if self.x11 and self.get_mapped() and not self.mini_drag:  # stay on the edge
             self.x11.move(self.xid(), *self.edge_pos(self.L.edge, self.settings.get("t", 0.95)))
 
-    def fit_free(self, force=False):
-        """Free Tux: his window grows beside him to fit the answer and goes back after, to
-        exactly the size and spot you gave him. Tux stays put; the window only slides if the
-        box would run off the screen."""
-        if not self.get_mapped() or min(self.get_default_size()) <= 0:
-            return
-        side = self.L.SIDE
-        narrow = free_layout(side)
-        home = self.free_home or self.free_home_now()
-        s = min(home["w"] / narrow.DW, home["h"] / narrow.DH)
-        bw, bh = self.wanted_box(s)
-        if not self.x11:  # can't move the window to keep Tux put: only grow away from him
-            if free_layout(side, bw, bh).ART[1] != narrow.ART[1]:
-                bh = narrow.BUBBLE[3]
-            if free_layout(side, bw, bh).ART[0] != narrow.ART[0]:
-                bw = FREE_BW
-        old = self.L.BUBBLE
-        if not force and abs(bw - old[2]) < 4 and abs(bh - old[3]) < 4:
-            return
-        new = free_layout(side, bw, bh)
-        nw = home["w"] + math.ceil((new.DW - narrow.DW) * s)
-        nh = home["h"] + math.ceil((new.DH - narrow.DH) * s)
-        grown = new.BUBBLE != narrow.BUBBLE
-        self.L = new
-        self.region_key = None
-        self.set_default_size(nw, nh)
-        self.area.queue_draw()
-        if self.x11:   # Tux stays put
-            x = home["x"] + round((narrow.ART[0] - new.ART[0]) * s)
-            y = home["y"] + round((narrow.ART[1] - new.ART[1]) * s)
-            if grown:  # ...unless the box would run off the screen
-                wx, wy, ww, wh = self.x11.workarea()
-                x, y = max(wx, min(x, wx + ww - nw)), max(wy, min(y, wy + wh - nh))
-            self.x11.move(self.xid(), x, y)
-        self.free_home = home if grown else None
-
-    def free_home_now(self):
-        """Free Tux's size and spot with the narrow box, worked out from how he is now."""
-        w, h = self.get_default_size()
-        narrow = free_layout(self.L.SIDE)
-        s = min(w / self.L.DW, h / self.L.DH)
-        x, y = self.x11.pos(self.xid()) if self.x11 else (None, None)
-        if x is not None:
-            x = round(x + (self.L.ART[0] - narrow.ART[0]) * s)
-            y = round(y + (self.L.ART[1] - narrow.ART[1]) * s)
-        return {"w": round(w - (self.L.DW - narrow.DW) * s),
-                "h": round(h - (self.L.DH - narrow.DH) * s), "x": x, "y": y}
-
     def text_height(self, width, s=1.0):
         """How tall the current bubble text is, in design units, at this box text width."""
         cr, size, blocks = self.measure(s)
         return self.layout_blocks(cr, blocks, width * s, size, s)[1] / s
 
     def place_window(self):
-        """On top / position. Needs XWayland; without it Tux is a normal window."""
+        """On top, just under the top bar. Needs XWayland; without it Tux is a normal window."""
         if not self.x11 or not self.get_mapped():
             return False
         xid = self.xid()
-        mini = self.L.mode == "mini"
-        self.x11.set_on_top(xid, mini or self.settings.get("on_top", False))
-        if mini:
-            self.x11.move(xid, *self.edge_pos(self.L.edge, self.settings.get("t", 0.95)))
-        elif not self.placed_once and self.settings.get("free_pos"):
-            self.x11.move(xid, *self.settings["free_pos"])
+        self.x11.set_on_top(xid, True)
+        self.x11.move(xid, *self.edge_pos("top", self.settings.get("t", 0.95)))
         self.placed_once = True
         return False
-
-    def set_mode(self, mode):
-        self.remember_free_spot()
-        self.settings["in_bar"] = mode == "bar"
-        if mode == "bar":
-            mode = "mini"
-            self.drop_from_bar()
-        self.settings["mode"] = mode
-        save_settings(self.settings)
-        self.apply_mode()
-        if self.in_bar():
-            self.say("Mini Tux in the top bar! I live in my icon up there: click it (or press "
-                     "the shortcut) and I drop down to help, then pop back up when you're done.")
-        elif self.settings["in_bar"]:
-            self.say("Mini Tux in the top bar needs a desktop that shows tray icons. "
-                     "Ubuntu does; on plain GNOME add the AppIndicator extension. "
-                     "Until then I'm Mini Tux on the screen edge.")
-        elif mode == "mini":
-            self.say("Mini Tux! I stay on top, on every workspace. Drag me along any screen edge; "
-                     "click me to ask. Right-click for settings.")
-        else:
-            self.say("Free Tux! Drag me anywhere. Resize with the lines on my foot or Ctrl+scroll.")
-
-    def toggle_on_top(self, on=None):
-        self.settings["on_top"] = (not self.settings.get("on_top")) if on is None else on
-        save_settings(self.settings)
-        self.place_window()
-        self.say("I'll stay on top of your windows, on every workspace." if self.settings["on_top"]
-                 else "Okay, I'm a normal window again.")
-
-    def remember_free_spot(self):
-        """Save Free Tux's size and spot as they are with the narrow box."""
-        if self.L.mode == "free" and self.get_mapped():
-            home = self.free_home or self.free_home_now()
-            self.settings["free_size"] = [home["w"], home["h"]]
-            if self.x11:
-                self.settings["free_pos"] = [home["x"], home["y"]]
-
-    def on_scroll(self, ctl, _dx, dy):
-        if self.L.mode == "mini" or not (ctl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK):
-            return False
-        self.free_home = None
-        h = self.get_height()
-        nh = max(110, min(320, int(h * (0.9 if dy > 0 else 1.1))))  # wide layout: keep it sane
-        self.set_default_size(int(nh * self.L.DW / self.L.DH), nh)
-        return True
 
     def on_key(self, _ctl, keyval, _code, state):
         self.touch()
@@ -1991,8 +1827,6 @@ class Tux(Gtk.ApplicationWindow):
     def summon(self):
         """Up front, bubble showing, text box open and ready to type."""
         if not self.get_visible():
-            if self.in_bar() and self.settings.get("edge") != "top":
-                self.drop_from_bar()
             self.set_visible(True)
         self.present()
         if self.x11:  # once he's on screen, make sure he gets the keyboard
@@ -2012,7 +1846,6 @@ class Tux(Gtk.ApplicationWindow):
     def tuck_away(self):
         """Minimize, or with the top-bar icon showing, hide into it (gone from the dock too)."""
         if self.tray and self.tray.shown:
-            self.remember_free_spot()
             self.placed_once = False     # put him back where he was when he returns
             self.set_visible(False)
         else:
@@ -2028,9 +1861,9 @@ class Tux(Gtk.ApplicationWindow):
             self.summon()
 
     def in_bar(self):
-        """Mini Tux in the top bar: he lives in his icon and drops down from it to talk."""
-        return self.opt("mode") == "mini" and self.settings.get("in_bar", False) \
-            and bool(self.tray and self.tray.shown)
+        """He lives in his top-bar icon and drops down from it to talk (when the desktop
+        shows tray icons; otherwise he just stays under the top bar)."""
+        return bool(self.tray and self.tray.shown)
 
     def drop_from_bar(self, x=0):
         """Put Mini Tux on the top edge, just under the bar, below where you clicked."""
@@ -2039,32 +1872,22 @@ class Tux(Gtk.ApplicationWindow):
         wx, wy, ww, wh = self.x11.workarea()
         x = x or self.x11.pointer()[0]
         tw = MINI_TH * ART_W / ART_H
-        self.settings["edge"] = "top"
         self.settings["t"] = min(1.0, max(0.0, (x - tw / 2 - wx) / max(1, ww - tw)))
         self.placed_once = False
         self.apply_mode()
 
     def tray_apply(self):
-        """Start or stop the top-bar icon to match Settings."""
-        if self.opt("tray") and not self.tray:
-            self.tray = Tray(ART_PNG, self.tray_click, [
-                ("Show / hide Tux", lambda: self.tray_click()),
-                ("Settings…", lambda: (self.summon(), self.show_settings(1))),
-                None,
-                ("Quit Tux", self.close),
-            ], on_change=lambda shown: self.get_visible() or shown or self.summon())
-            if not self.tray.start():
-                self.tray = None
-        elif not self.opt("tray") and self.tray:
-            self.tray.stop()
+        """Put his icon in the top bar."""
+        if self.tray:
+            return
+        self.tray = Tray(ART_PNG, self.tray_click, [
+            ("Show / hide Tux", lambda: self.tray_click()),
+            ("Settings…", lambda: (self.summon(), self.show_settings(1))),
+            None,
+            ("Quit Tux", self.close),
+        ], on_change=lambda shown: self.get_visible() or shown or self.summon())
+        if not self.tray.start():
             self.tray = None
-            if not self.get_visible():
-                self.summon()
-
-    def tray_state(self):
-        if not self.opt("tray"):
-            return "off"
-        return "on" if self.tray and self.tray.shown else "on (this desktop shows no tray icons)"
 
     def copy(self, text):
         self.last_copied = text
@@ -2141,13 +1964,10 @@ class Tux(Gtk.ApplicationWindow):
         save_settings(self.settings)
 
     def show_settings(self, page=1):
-        mini = self.opt("mode") == "mini"
-
         def change(key, values, relayout=False):
             def go():
                 self._cycle(key, values)
                 if relayout:
-                    self.remember_free_spot()
                     self.apply_mode()
                 self.apply_theme()
                 self.show_settings(page)
@@ -2155,49 +1975,28 @@ class Tux(Gtk.ApplicationWindow):
 
         if page == 1:
             items = [
-                (f"Mode: {self.mode_label()}",
-                 lambda: (self.set_mode(self.next_mode()), self.show_settings(1))),
                 (f"Bubble: {self.SIDE_NAMES[self.opt('bubble_side')]}",
-                 change("bubble_side", list(BUBBLE_SIDES), relayout=True)),
+                 change("bubble_side", [v for v in BUBBLE_SIDES if v != "above"], relayout=True)),
                 (f"See-through: {self._label(self.SEE_THROUGH, self.opt('opacity'))}",
                  change("opacity", [v for v, _ in self.SEE_THROUGH])),
                 (f"Text size: {self._label(self.TEXT_SIZES, self.opt('text_size'))}",
-                 change("text_size", [v for v, _ in self.TEXT_SIZES], relayout=mini)),
+                 change("text_size", [v for v, _ in self.TEXT_SIZES], relayout=True)),
                 ("More settings…", lambda: self.show_settings(2)),
             ]
         else:
-            on_top = "always (Mini Tux)" if mini else ("on" if self.opt("on_top") else "off")
             items = [
                 (f"Theme: {self.opt('theme')}", change("theme", ["light", "dark"])),
                 (f"Hide bubble after: {self._label(self.HIDE_AFTER, self.opt('hide_secs'))}",
                  change("hide_secs", [v for v, _ in self.HIDE_AFTER])),
-                (f"Keep on top: {on_top}",
-                 (lambda: self.show_settings(2)) if mini else
-                 (lambda: (self.toggle_on_top(), self.show_settings(2)))),
                 (f"Keyboard shortcut: {self.shortcut_state()}", self.shortcut_offer),
-                (f"Taskbar icon: {self.tray_state()}",
-                 lambda: (self._cycle("tray", [True, False]), self.tray_apply(),
-                          GLib.timeout_add(300, lambda: (self.show_settings(2), False)[-1]))),
                 (f"Arch Wiki: {self.wiki_state()}", self.wiki_offer),
                 ("‹ Back", lambda: self.show_settings(1)),
             ]
-        note = "" if self.x11 else " (on-top & edges need XWayland)"
+        note = "" if self.x11 else " (staying on top needs XWayland)"
+        if not self.in_bar():
+            note += ("\nNo tray icons on this desktop, so I stay out here. Add the "
+                     "AppIndicator extension and I'll live in the top bar.")
         self.say_actions(f"Settings {page}/2{note}", items)
-
-    def mode_label(self):
-        if self.opt("mode") != "mini":
-            return "Free Tux (move & resize)"
-        if self.settings.get("in_bar"):
-            return "Mini Tux in the top bar"
-        return "Mini Tux (tiny, on the screen edge)"
-
-    def next_mode(self):
-        """Free → Mini → Mini in the top bar (when there's a tray to live in) → Free."""
-        if self.opt("mode") != "mini":
-            return "mini"
-        if not self.settings.get("in_bar") and self.tray and self.tray.shown:
-            return "bar"
-        return "free"
 
     def apply_theme(self):
         if self.opt("theme") == "dark":
@@ -2300,22 +2099,14 @@ class Tux(Gtk.ApplicationWindow):
         self.pointer_in = False
 
     def on_top_offer(self):
-        """'stay on top' / 'sit on my dock': offer the two ways to stay visible."""
-        if not self.x11:
-            self.say("Staying on top needs XWayland, which isn't running here. Try your window "
-                     "menu (often Alt+Space) → Always on Top.")
-            return
-        ways = [
-            ("Mini Tux: tiny, rides the screen edge", lambda: self.set_mode("mini")),
-            ("Big Tux, kept on top of other windows",
-             lambda: (self.set_mode("free") if self.L.mode == "mini" else None,
-                      self.toggle_on_top(True))),
-            ("Not now", lambda: self.say("No problem. Right-click me any time.")),
-        ]
-        if self.tray and self.tray.shown:  # the top bar shows tray icons: he can live there
-            ways.insert(0, ("Mini Tux in the top bar: drops down when you need him",
-                            lambda: self.set_mode("bar")))
-        self.say_actions(f"I can stay handy {len(ways) - 1} ways:", ways)
+        """'stay on top' / 'sit on my taskbar': that's where he already lives."""
+        if self.in_bar():
+            self.say("I live in the top bar: click my icon up there (or press the shortcut) and "
+                     "I drop down, then pop back up when you're done. Drag me along to move me.")
+        else:
+            self.say("I stay on top, just under the top bar. This desktop shows no tray icons; "
+                     "add the AppIndicator extension and I'll tuck into the top bar between "
+                     "questions.")
 
     # ---- 📖 links: open in Help (yelp) if it's there, else show the gist in the bubble
     def open_help(self, uri):
@@ -2615,7 +2406,6 @@ class Tux(Gtk.ApplicationWindow):
 
     def on_close(self, *_):
         self.gen += 1
-        self.remember_free_spot()
         save_settings(self.settings)
         self.brain.stop()
         if self.tray:
