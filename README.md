@@ -57,9 +57,12 @@ system packages from the install step stay, since other apps use them too.
 | Type or paste a command, e.g. `tar -xzf a.tgz -C /tmp` or "what does `rm -rf ~/x` do?" | He says what it would do, part by part, and warns about anything risky. He never runs it ([more](#what-would-this-command-do)) |
 | Copy a command, then click Tux and press Enter | The same breakdown for the copied command |
 | Ask for "tips" or "tricks" | Instant power-user moves |
+| Press **↑** / **↓** in the text box | Step back through your recent questions: each shows the answer he gave then, and Enter asks it again ([more](#recent-questions)) |
+| `Ctrl+H` | Your recent questions, newest first. Click one to see its answer |
+| Scroll the wheel over him, or `Page Up` / `Page Down` | Scrolls a long answer (a **more ↓** tag shows there's more; click it to jump down) |
 | Click the 📖 link | Opens the matching GNOME Help page (no Help app installed? He shows the gist in the bubble and the command to install it) |
 | Drag him | Move |
-| Drag the lines on his right foot / `Ctrl+scroll` | Resize |
+| Drag the lines on his right foot / `Ctrl+scroll` | Resize (Free Tux) |
 | Click his icon in the top bar | Call him up / put him away. Right-click it for Settings or Quit ([more](#his-icon-in-the-top-bar)) |
 | Yellow / red button on his head | Put away (into his top-bar icon, or minimized) / close |
 | Hover over him | Brings his speech bubble back (it tucks away when idle) |
@@ -100,6 +103,8 @@ Four short pages. Click a line to change it; it applies right away and is rememb
 | | Taskbar icon | on (default) / off: his icon in the top bar, and putting him away hides him there |
 | **Extras** | Keyboard shortcut | Ctrl+Alt+Space / off. Change the keys in GNOME Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → *Tux* |
 | | Arch Wiki | off (default) / on: optional offline add-on, downloaded on request; can be deleted again |
+| | Recent questions… | The same list as `Ctrl+H` |
+| | Remember recent questions | on (default) / off: off also forgets what's saved |
 | | Copy my settings | Copies every setting in plain words, to paste into a message |
 | | Reset everything to defaults | Asks first; your notes stay |
 
@@ -107,9 +112,27 @@ Asking him to "stay on top" also offers the visible options. He remembers where 
 
 **His box fits the answer.** It stays small while he's idle or you're typing. For an answer it
 gets wider until a command of up to 44 characters fits on one line (most of his commands are
-shorter), and taller when there's more text, so the text never has to shrink. Tux himself stays
-put: the box grows beside him, picks his other side if there's no room, and shrinks back when he
-goes idle.
+shorter), and taller when there's more text, up to about 70% of your screen. The text always
+stays at the size you picked: an answer longer than that scrolls instead (wheel, Page Up /
+Page Down, or click **more ↓**). Tux himself stays put: the box grows beside him, picks his other
+side if there's no room, and shrinks back when he goes idle.
+
+**Long answers are laid out to scan.** ⚠ warnings sit in a tinted box in bold red, a command
+breakdown lines up in two columns (the part, then what it does), and side notes such as
+"(Not run: …)" are small and grey.
+
+### Recent questions
+
+Tux keeps your last 50 questions together with the answer he gave, so you can look back without
+asking again:
+
+- **↑ / ↓ in the text box** steps through them, like a terminal's history. The question goes in
+  the box and the old answer shows right away. Enter asks it again, Esc goes back.
+- **`Ctrl+H`** (or the top-bar icon menu, or Settings → Extras → *Recent questions…*) lists them
+  newest first. Click one to see its answer, then *Ask it again* or go back to the list.
+- They're saved on your machine only, in `~/.config/tux/recent.json` (readable only by you).
+  Settings → Extras → *Remember recent questions: off* stops saving and deletes the file's
+  contents; *Clear the list* in the list empties it.
 
 ### His icon in the top bar
 
