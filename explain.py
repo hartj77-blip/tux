@@ -375,7 +375,7 @@ def warnings_for(cmd, args, redir, raw):
         if op in (">", "&>") and re.match(r"/dev/(sd|nvme|hd|vd|mmcblk)", target):
             w.append(f"⚠ DANGER: writes straight onto the drive `{target}`, destroying what's on it.")
         elif op in (">", "&>") and target and target != "/dev/null":
-            w.append(f"Replaces everything in `{target}` (use >> to add instead).")
+            w.append(f"⚠ Replaces everything in `{target}` (use >> to add instead).")
     return w
 
 
@@ -387,7 +387,7 @@ def global_warnings(raw):
     if re.search(r":\(\)\s*\{.*:\|:.*\};\s*:", raw):
         w.append("⚠ DANGER: a fork bomb. It freezes the computer. Don't run it.")
     if re.search(r"\bsudo\b", raw):
-        w.append("Runs as administrator (root), so it can change anything.")
+        w.append("⚠ Runs as administrator (root), so it can change anything.")
     return w
 
 

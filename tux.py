@@ -256,6 +256,44 @@ def save_settings(d):
         pass
 
 
+# recent questions and their answers (Ctrl+H, or ↑ in the text box), kept between runs
+RECENT_FILE = os.path.join(os.path.dirname(SETTINGS_FILE), "recent.json")
+RECENT_MAX = 50
+
+
+def load_recent():
+    try:
+        with open(RECENT_FILE) as f:
+            items = json.load(f)
+        return [e for e in items if isinstance(e, dict) and e.get("q")][-RECENT_MAX:]
+    except (OSError, ValueError):
+        return []
+
+
+def save_recent(items):
+    try:
+        os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
+        keep = [{k: e.get(k) for k in ("q", "a", "uri", "t", "ask")} for e in items[-RECENT_MAX:]]
+        with open(RECENT_FILE + ".tmp", "w") as f:
+            json.dump(keep, f)
+        os.chmod(RECENT_FILE + ".tmp", 0o600)   # your questions are nobody else's business
+        os.replace(RECENT_FILE + ".tmp", RECENT_FILE)
+    except OSError:
+        pass
+
+
+def time_ago(t, short=False):
+    d = max(0, time.time() - (t or 0))
+    if d < 60:
+        return "now" if short else "just now"
+    for secs, unit, word in ((86400, "d", "day"), (3600, "h", "h"), (60, "m", "min")):
+        if d >= secs:
+            n = int(d // secs)
+            if short:
+                return f"{n}{unit}"
+            return f"{n} {word}{'s' if word == 'day' and n > 1 else ''} ago"
+
+
 def settings_summary(settings, defaults, mode=None, tray=None):
     """Plain-words list of every setting, marking the ones changed from the default."""
     v = lambda k: settings.get(k, defaults[k])
@@ -279,6 +317,7 @@ def settings_summary(settings, defaults, mode=None, tray=None):
         ("When Tux starts", "stay in the top-bar icon" if v("start_hidden") else "show him",
          "start_hidden" in settings),
         ("Greeting tip", "on" if v("tips") else "off", "tips" in settings),
+        ("Remember recent questions", "on" if v("keep_recent") else "off", "keep_recent" in settings),
         ("Taskbar icon", tray or ("on" if v("tray") else "off"), "tray" in settings),
     ]
     if settings.get("edge"):
@@ -1223,6 +1262,12 @@ def parse_answer(text):
             blocks.append(("ctx", line))
         elif line.startswith("▸ "):
             blocks.append(("action", line[2:].strip()))
+        elif line.startswith("⚠"):
+            blocks.append(("warn", line.strip()))
+        elif re.fullmatch(r"\s*•\s*`[^`]+`\s+.+", line):   # breakdown: • `part` what it does
+            blocks.append(("part", line.strip()))
+        elif re.fullmatch(r"\s*\([^()]*\)\s*", line):    # "(Not run: …)", "(copied ✓)": a side note
+            blocks.append(("ctx", line.strip()))
         elif line.strip():
             blocks.append(("text", line.strip()))
     return blocks
@@ -1264,6 +1309,11 @@ class Tux(Gtk.ApplicationWindow):
         self.art = cairo.ImageSurface.create_from_png(ART_PNG)
         self.art_runs = json.load(open(ART_JSON))["runs"]
         self.history = []
+        self.recent = load_recent() if self.settings.get("keep_recent", True) else []
+        self.rec = None              # (gen, entry) the question being answered right now
+        self.recall = None           # where ↑/↓ is in your recent questions, while stepping
+        self.recall_back = None      # what the bubble said before you started stepping
+        self.recent_save_src = None
         self.bubble_text = ""          # greeting is set once the mode is known
         self.help_uri = None
         self.has_yelp = bool(shutil.which("yelp"))  # no Help app: 📖 links show a summary instead
@@ -1282,6 +1332,8 @@ class Tux(Gtk.ApplicationWindow):
         self.tray = None             # top-bar icon (Settings → Taskbar icon)
         GLib.idle_add(lambda: (self.tray_apply(), False)[-1])
         self.boxes = []              # [(x, y, w, h, kind, payload)] clickable bits of the bubble
+        self.scroll_y = self.scroll_max = 0.0   # a long answer scrolls instead of shrinking
+        self.scroll_step = 20.0
         self.region_key = None
         self.free_home = None        # Free Tux's size and spot with the narrow box, while it's wide
 
@@ -1305,7 +1357,7 @@ class Tux(Gtk.ApplicationWindow):
         self.area.set_draw_func(self.draw)
         overlay.set_child(self.area)
 
-        self.entry = Gtk.Entry(placeholder_text="ask Tux…")
+        self.entry = Gtk.Entry(placeholder_text="ask Tux…  (↑ recent)")
         self.entry.add_css_class("tux")
         self.entry.set_halign(Gtk.Align.START)
         self.entry.set_valign(Gtk.Align.START)
@@ -1338,6 +1390,11 @@ class Tux(Gtk.ApplicationWindow):
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self.on_key)
         self.add_controller(keys)
+        # ↑/↓ and Page Up/Down before the text box sees them: recent questions, scrolling
+        keys_first = Gtk.EventControllerKey()
+        keys_first.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys_first.connect("key-pressed", self.on_key_first)
+        self.add_controller(keys_first)
 
         self.connect("close-request", self.on_close)
         # once he's on screen: stay on top / take his spot (XWayland only)
@@ -1503,26 +1560,58 @@ class Tux(Gtk.ApplicationWindow):
 
     THEMES = {
         "light": {"fill": (1, 1, 1), "edge": (0.1, 0.1, 0.12), "text": (0.08, 0.08, 0.1),
-                  "cmd_bg": (0.13, 0.14, 0.17), "link": "#1a5fb4", "clip": "#8a4b00", "ctx": "#666666"},
+                  "cmd_bg": (0.13, 0.14, 0.17), "link": "#1a5fb4", "clip": "#8a4b00", "ctx": "#666666",
+                  "warn": "#b42318", "warn_bg": (0.99, 0.93, 0.91)},
         "dark": {"fill": (0.13, 0.14, 0.16), "edge": (0.55, 0.57, 0.62), "text": (0.93, 0.93, 0.95),
-                 "cmd_bg": (0.05, 0.05, 0.06), "link": "#8ab4f8", "clip": "#f6c177", "ctx": "#a0a0a8"},
+                 "cmd_bg": (0.05, 0.05, 0.06), "link": "#8ab4f8", "clip": "#f6c177", "ctx": "#a0a0a8",
+                 "warn": "#ffb4a8", "warn_bg": (0.30, 0.15, 0.14)},
     }
+    LINE_SPACING = 1.18   # a little air between wrapped lines
+    GAP, GROUP_GAP = 3, 9  # between lines of the same kind / between groups (warnings, parts…)
 
     def theme(self):
         return self.THEMES.get(self.opt("theme"), self.THEMES["light"])
 
+    def _layout(self, cr, size, width, fam="Sans"):
+        lay = PangoCairo.create_layout(cr)
+        lay.set_font_description(Pango.FontDescription.from_string(f"{fam} {max(size, 5):.1f}"))
+        lay.set_width(int(max(width, 10) * Pango.SCALE))
+        lay.set_wrap(Pango.WrapMode.WORD_CHAR)
+        if fam == "Sans" and hasattr(lay, "set_line_spacing"):  # Pango 1.44+
+            lay.set_line_spacing(self.LINE_SPACING)
+        return lay
+
     def layout_blocks(self, cr, blocks, tw, size, s):
-        """Pango layouts for each block at this font size -> (layouts, total height)."""
+        """Pango layouts for each block at this font size -> (layouts, total height).
+        Each item is (kind, text, layout, height, gap above it, extra); for a breakdown part
+        the extra is (description layout, x where the description starts)."""
         th_ = self.theme()
         layouts, total = [], 0
+        # breakdown parts line up in two columns: the part, then what it does
+        parts = [re.fullmatch(r"\s*•\s*`([^`]+)`\s+(.+)", t) for k, t in blocks if k == "part"]
+        col = 0
+        if parts:
+            for m in parts:
+                probe = self._layout(cr, size, 10_000, "Monospace")
+                probe.set_markup(f"<b>{esc(m.group(1))}</b>", -1)
+                col = max(col, probe.get_pixel_size()[0])
+            col = min(col, tw * 0.38) + 10 * s
+        prev = None
         for kind, txt in blocks:
-            lay = PangoCairo.create_layout(cr)
+            extra = None
             fam = "Monospace" if kind == "cmd" else "Sans"
-            lay.set_font_description(Pango.FontDescription.from_string(f"{fam} {max(size, 5):.1f}"))
-            lay.set_width(int((tw - (10 * s if kind == "cmd" else 0)) * Pango.SCALE))
-            lay.set_wrap(Pango.WrapMode.WORD_CHAR)
+            lay = self._layout(cr, size, tw - (10 * s if kind in ("cmd", "warn") else 0), fam)
             if kind == "cmd":
                 lay.set_text(txt, -1)
+            elif kind == "warn":
+                lay.set_markup(f"<span foreground='{th_['warn']}'><b>{esc(txt)}</b></span>", -1)
+            elif kind == "part":
+                m = re.fullmatch(r"\s*•\s*`([^`]+)`\s+(.+)", txt)
+                lay = self._layout(cr, size, col - 10 * s, "Monospace")
+                lay.set_markup(f"<b>{esc(m.group(1))}</b>", -1)
+                desc = self._layout(cr, size, tw - col)
+                desc.set_markup(inline_markup(m.group(2)), -1)
+                extra = (desc, col)
             elif kind == "help":
                 lay.set_markup(f"<span foreground='{th_['link']}'><u>{esc(txt)}</u></span>", -1)
             elif kind == "clip":
@@ -1533,9 +1622,21 @@ class Tux(Gtk.ApplicationWindow):
                 lay.set_markup(f"<span foreground='{th_['link']}'><b>▸ {esc(txt)}</b></span>", -1)
             else:
                 lay.set_markup(inline_markup(txt), -1)
-            lh = lay.get_pixel_size()[1] + (8 * s if kind == "cmd" else 0)
-            layouts.append((kind, txt, lay, lh))
-            total += lh + 4 * s
+                if txt.startswith("• "):   # wrapped lines start under the text, not the dot
+                    probe = self._layout(cr, size, 10_000)
+                    probe.set_text("• ", -1)
+                    lay.set_indent(-probe.get_pixel_size()[0] * Pango.SCALE)
+            lh = lay.get_pixel_size()[1]
+            if kind == "cmd":
+                lh += 8 * s
+            elif kind == "warn":
+                lh += 6 * s
+            elif kind == "part":
+                lh = max(lh, extra[0].get_pixel_size()[1])
+            gap = 0 if prev is None else (self.GAP if kind == prev else self.GROUP_GAP) * s
+            layouts.append((kind, txt, lay, lh, gap, extra))
+            total += gap + lh
+            prev = kind
         return layouts, total
 
     def draw_bubble(self, cr, s, ox, oy):
@@ -1555,34 +1656,84 @@ class Tux(Gtk.ApplicationWindow):
         if self.entry.get_visible():  # the text box sits inside the bubble, at the bottom
             th -= (self.L.ENTRY[3] + 6) * s
         blocks = parse_answer(self.bubble_text) or [("text", self.bubble_text)]
-        size = self.L.FONT * self.opt("text_size") * s
-        while True:  # shrink text until it fits
-            layouts, total = self.layout_blocks(cr, blocks, tw, size, s)
-            if total <= th or size <= 6.5 * s:
-                break
-            size *= 0.9
-        y = Y + pad
+        size = self.L.FONT * self.opt("text_size") * s   # always the size you picked
+        layouts, total = self.layout_blocks(cr, blocks, tw, size, s)
+        # too long even for the tallest box: scroll it (mouse wheel / Page Up, Page Down)
+        top_y, bot_y = Y + pad, Y + pad + th
+        self.scroll_max = total - th if total - th > 2 * s else 0.0
+        self.scroll_y = min(max(self.scroll_y, 0.0), self.scroll_max)
+        self.scroll_step = size * 3
+        y = top_y - self.scroll_y
+
+        def clickable(x0, y0, w0, h0, kind, payload):  # only the part you can see
+            a, b = max(y0, top_y), min(y0 + h0, bot_y)
+            if b > a:
+                self.boxes.append((x0, a, w0, b - a, kind, payload))
+
         cr.save()
-        cr.rectangle(X + pad / 2, Y + pad / 2, W - pad, H - pad); cr.clip()
-        for kind, txt, lay, lh in layouts:
+        cr.rectangle(X + pad / 2, top_y - (pad / 2 if not self.scroll_max else 0),
+                     W - pad, th + (pad / 2 if not self.scroll_max else 0)); cr.clip()
+        for kind, txt, lay, lh, gap, extra in layouts:
+            y += gap
+            if y > bot_y or y + lh < top_y:   # scrolled out of sight
+                y += lh
+                continue
             if kind == "cmd":
                 cr.set_source_rgb(*th_["cmd_bg"])
                 self.round_rect(cr, X + pad, y, tw, lh, 6 * s); cr.fill()
                 cr.set_source_rgb(0.55, 0.95, 0.55)
                 cr.move_to(X + pad + 5 * s, y + 4 * s)
-                self.boxes.append((X + pad, y, tw, lh, "cmd", txt))
+                clickable(X + pad, y, tw, lh, "cmd", txt)
+            elif kind == "warn":   # warnings stand out: tinted box, bold red text
+                cr.set_source_rgb(*th_["warn_bg"])
+                self.round_rect(cr, X + pad, y, tw, lh, 5 * s); cr.fill()
+                cr.move_to(X + pad + 5 * s, y + 3 * s)
+            elif kind == "part":
+                cr.set_source_rgb(*th_["text"])
+                cr.move_to(X + pad + extra[1], y)
+                PangoCairo.show_layout(cr, extra[0])
+                cr.move_to(X + pad, y)
             else:
                 if kind == "help":
-                    self.boxes.append((X + pad, y, tw, lh, "help", self.help_uri))
+                    clickable(X + pad, y, tw, lh, "help", self.help_uri)
                 elif kind == "clip":
-                    self.boxes.append((X + pad, y, tw, lh, "clip", None))
+                    clickable(X + pad, y, tw, lh, "clip", None)
                 elif kind == "action":
-                    self.boxes.append((X + pad, y, tw, lh, "action", txt))
+                    clickable(X + pad, y, tw, lh, "action", txt)
                 cr.set_source_rgb(*th_["text"])
                 cr.move_to(X + pad, y)
             PangoCairo.show_layout(cr, lay)
-            y += lh + 4 * s
+            y += lh
         cr.restore()
+        if self.scroll_max:
+            self.draw_scroll_hints(cr, X, top_y, W, th, size, s)
+
+    def draw_scroll_hints(self, cr, X, top_y, W, th, size, s):
+        """Fades where the text runs on, and a "more ↓" tag while there's more below."""
+        th_ = self.theme()
+        fill, alpha = th_["fill"], self.opt("opacity")
+        fade = 14 * s
+        for at_top, show in ((True, self.scroll_y > 0.5), (False, self.scroll_y < self.scroll_max - 0.5)):
+            if not show:
+                continue
+            y0 = top_y if at_top else top_y + th - fade
+            g = cairo.LinearGradient(0, y0, 0, y0 + fade)
+            g.add_color_stop_rgba(0, *fill, alpha if at_top else 0)
+            g.add_color_stop_rgba(1, *fill, 0 if at_top else alpha)
+            cr.rectangle(X + 2 * s, y0, W - 4 * s, fade)
+            cr.set_source(g); cr.fill()
+        if self.scroll_y < self.scroll_max - 0.5:
+            lay = self._layout(cr, size * 0.8, 10_000)
+            lay.set_markup("<b>more ↓</b>", -1)
+            lw, lh = lay.get_pixel_size()
+            px, py = X + W - lw - 22 * s, top_y + th - lh - 2 * s
+            cr.set_source_rgb(*th_["cmd_bg"])
+            self.round_rect(cr, px - 6 * s, py - 1 * s, lw + 12 * s, lh + 2 * s, (lh + 2 * s) / 2)
+            cr.fill()
+            cr.set_source_rgb(1, 1, 1)
+            cr.move_to(px, py)
+            PangoCairo.show_layout(cr, lay)
+            self.boxes.append((px - 6 * s, py, lw + 12 * s, lh, "more", None))
 
     @staticmethod
     def round_rect(cr, x, y, w, h, r):
@@ -1674,6 +1825,8 @@ class Tux(Gtk.ApplicationWindow):
             if bx <= x <= bx + bw and by <= y <= by + bh:
                 if kind == "cmd":
                     self.copy(payload)
+                elif kind == "more":
+                    self.scroll_by(self.L.BUBBLE[3] * self.geom()[0] * 0.6)
                 elif kind == "clip":
                     self.drop_clip()
                 elif kind == "action":
@@ -1760,7 +1913,7 @@ class Tux(Gtk.ApplicationWindow):
     DEFAULTS = {"mode": "free", "bubble_side": "right", "opacity": 0.97, "text_size": 1.0,
                 "theme": "light", "hide_secs": HIDE_SECS, "on_top": False, "arch_wiki": False,
                 "tray": True, "mini_size": "normal", "box_width": "normal",
-                "bar_return": "bubble", "start_hidden": False, "tips": True}
+                "bar_return": "bubble", "start_hidden": False, "tips": True, "keep_recent": True}
 
     def opt(self, key):
         return self.settings.get(key, self.DEFAULTS[key])
@@ -1810,7 +1963,7 @@ class Tux(Gtk.ApplicationWindow):
         if self.x11:
             wa = wa or self.x11.workarea()
             t = self.settings.get("t", 0.95)
-            big = (MINI_BH_MAX, self.widest_box(1.0, MINI_FONT))
+            big = (self.tallest_box(mini=True), self.widest_box(1.0, MINI_FONT))
             variants.sort(key=lambda v: edge_overflow(mini_layout(edge, v[0], *big, *v[1:],
                                                                   th=self.mini_th()),
                                                       edge, t, wa))   # stable: your pick wins ties
@@ -1841,8 +1994,8 @@ class Tux(Gtk.ApplicationWindow):
         wider when a command would wrap (up to widest_box()), and taller when there's more
         text, so it never has to shrink."""
         mini = self.L.mode == "mini"
-        narrow, short, tall = ((self.box_narrow(), MINI_BH_MIN, MINI_BH_MAX) if mini else
-                               (FREE_BW, free_layout(self.L.SIDE).BUBBLE[3], FREE_BH_MAX))
+        narrow, short, tall = ((self.box_narrow(), MINI_BH_MIN, self.tallest_box()) if mini else
+                               (FREE_BW, free_layout(self.L.SIDE).BUBBLE[3], self.tallest_box(s)))
         if not self.bubble_on():
             return narrow, short
         cr, size, blocks = self.measure(s)
@@ -1852,6 +2005,11 @@ class Tux(Gtk.ApplicationWindow):
         if cmds:
             longest = max(self.mono_width(cr, c, size) for c in cmds) / s + CMD_PAD
             bw = max(narrow, min(widest, longest))
+        acts = [txt for kind, txt in blocks if kind == "action"]
+        if acts:   # a list to click (Settings, recent questions): one line per choice
+            lay = self._layout(cr, size, 10_000)
+            lay.set_markup("<b>" + esc("\n".join("▸ " + a for a in acts)) + "</b>", -1)
+            bw = max(bw, min(widest, lay.get_pixel_size()[0] / s + 26))
 
         def need(w):  # box height the text needs at this width
             return self.text_height(w - 24, s) + self.box_pad()
@@ -1859,7 +2017,33 @@ class Tux(Gtk.ApplicationWindow):
         h = need(bw)
         if h > tall and bw < widest and need(widest) < h:
             bw, h = widest, need(widest)   # a long answer: wider beats tiny or cut-off text
-        return math.ceil(bw), int(min(tall, max(short, h)))
+        return math.ceil(bw), math.ceil(min(tall, max(short, h + 1)))
+
+    def screen_height(self):
+        if self.x11:
+            return self.x11.workarea()[3]
+        try:
+            disp = Gdk.Display.get_default()
+            surf = self.get_surface()
+            mon = (surf and disp.get_monitor_at_surface(surf)) or disp.get_monitors().get_item(0)
+            return mon.get_geometry().height - 32   # leave room for the top bar
+        except Exception:
+            return 720
+
+    def tallest_box(self, s=1.0, mini=None):
+        """The tallest the box grows (design units) before a long answer scrolls: most of
+        the screen's height, never less than it used to be."""
+        if mini is None:
+            mini = self.L.mode == "mini"
+        if mini:
+            L = mini_layout(self.settings.get("edge", "bottom"), self.opt("bubble_side"),
+                            th=self.mini_th())
+            floor = MINI_BH_MAX
+        else:
+            L = free_layout(self.L.SIDE)
+            floor = FREE_BH_MAX
+        around = L.DH - L.BUBBLE[3]     # window height that isn't box (Tux above/below it, margins)
+        return max(floor, int(self.screen_height() * 0.7 / s - around))
 
     def box_pad(self):
         """Box height that isn't text: margins, the button row, the text box if it's open."""
@@ -1983,8 +2167,22 @@ class Tux(Gtk.ApplicationWindow):
             if self.x11:
                 self.settings["free_pos"] = [home["x"], home["y"]]
 
+    def scroll_by(self, d):
+        """Scroll a long answer (in pixels); True if it moved."""
+        new = min(max(self.scroll_y + d, 0.0), self.scroll_max)
+        if abs(new - self.scroll_y) < 0.5:
+            return False
+        self.scroll_y = new
+        self.touch()
+        self.area.queue_draw()
+        return True
+
     def on_scroll(self, ctl, _dx, dy):
-        if self.L.mode == "mini" or not (ctl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK):
+        ctrl = ctl.get_current_event_state() & Gdk.ModifierType.CONTROL_MASK
+        if not ctrl and self.scroll_max and self.bubble_on():   # wheel scrolls a long answer
+            self.scroll_by(dy * self.scroll_step)
+            return True
+        if self.L.mode == "mini" or not ctrl:
             return False
         self.free_home = None
         h = self.get_height()
@@ -2002,13 +2200,32 @@ class Tux(Gtk.ApplicationWindow):
             if cmd:
                 self.copy(cmd)
             return True
+        if ctrl and keyval in (Gdk.KEY_h, Gdk.KEY_H):
+            self.show_recent(); return True
         if keyval == Gdk.KEY_Escape:
+            if self.recall is not None:
+                self.recall_stop(clear=True); return True
             if self.entry.get_visible():
                 self.entry.set_visible(False); self.region_key = None; self.area.queue_draw()
             return True
         ch = Gdk.keyval_to_unicode(keyval)
         if not ctrl and ch >= 32 and not self.entry.get_visible():
             self.show_entry(chr(ch)); return True
+        return False
+
+    def on_key_first(self, _ctl, keyval, _code, state):
+        mods = state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK |
+                        Gdk.ModifierType.SHIFT_MASK)
+        if mods:
+            return False
+        if keyval in (Gdk.KEY_Page_Down, Gdk.KEY_Page_Up) and self.scroll_max:
+            page = self.L.BUBBLE[3] * self.geom()[0] * 0.6
+            self.scroll_by(page if keyval == Gdk.KEY_Page_Down else -page)
+            return True
+        if keyval in (Gdk.KEY_Up, Gdk.KEY_KP_Up):
+            return self.recall_step(-1)
+        if keyval in (Gdk.KEY_Down, Gdk.KEY_KP_Down):
+            return self.recall_step(1)
         return False
 
     def show_entry(self, prefix=""):
@@ -2097,6 +2314,7 @@ class Tux(Gtk.ApplicationWindow):
         if self.opt("tray") and not self.tray:
             self.tray = Tray(ART_PNG, self.tray_click, [
                 ("Show / hide Tux", lambda: self.tray_click()),
+                ("Recent questions…", lambda: (self.summon(), self.show_recent())),
                 ("Settings…", lambda: (self.summon(), self.show_settings(1))),
                 None,
                 ("Quit Tux", self.close),
@@ -2132,7 +2350,7 @@ class Tux(Gtk.ApplicationWindow):
 
     def copy_answer(self):
         """Whole answer as plain text: no ``` fences, no Help link."""
-        lines = [s for k, s in parse_answer(self.bubble_text) if k in ("text", "cmd")]
+        lines = [s for k, s in parse_answer(self.bubble_text) if k in ("text", "cmd", "warn", "part")]
         text = "\n".join(l for l in lines if l != "(copied ✓)").strip()
         if text:
             self.copy(text)
@@ -2261,6 +2479,9 @@ class Tux(Gtk.ApplicationWindow):
             ]
         else:              # extras
             items = [
+                ("Recent questions… (Ctrl+H)", self.show_recent),
+                (f"Remember recent questions: {onoff('keep_recent')}",
+                 lambda: (self.set_keep_recent(not self.opt("keep_recent")), self.show_settings(4))),
                 (f"Keyboard shortcut: {self.shortcut_state()}", self.shortcut_offer),
                 (f"Arch Wiki: {self.wiki_state()}", self.wiki_offer),
                 ("Copy my settings (to share)", self.copy_settings),
@@ -2483,11 +2704,170 @@ class Tux(Gtk.ApplicationWindow):
     def say(self, text):
         if bool(text) != bool(self.bubble_text):
             self.region_key = None
+        if text.split("\n", 1)[0] != self.bubble_text.split("\n", 1)[0]:
+            self.scroll_y = 0.0   # something new: start at the top (a streaming answer keeps its place)
         self.bubble_text = text
         self.touch()
         self.fit_bubble()
         self.area.queue_draw()
         return False
+
+    # ---- recent questions: each one is saved with the answer he gave
+    TRANSIENT = ("reading the docs…", "checking apt & snap…", "thinking…")
+
+    def reply(self, gen, text):
+        """Show an answer to question number gen (if it's still the latest) and save it with
+        that question in your recent list."""
+        if gen != self.gen:
+            return False
+        if self.rec and self.rec[0] == gen and not text.endswith(self.TRANSIENT):
+            entry = self.rec[1]
+            entry["a"], entry["uri"] = text, self.help_uri
+            self.save_recent_soon()
+        return self.say(text)
+
+    def start_record(self, asked, clip):
+        """A new question: it goes at the end of your recent list (once, the newest copy)."""
+        self.rec = None
+        if not self.opt("keep_recent"):
+            return
+        if asked:
+            q = asked
+        else:
+            q = "📋 " + " ".join((clip or "").split())[:60] + ("…" if clip and len(clip) > 60 else "")
+        self.recent = [e for e in self.recent if e["q"] != q]
+        entry = {"q": q, "a": "", "uri": None, "t": time.time(), "ask": bool(asked)}
+        self.recent = (self.recent + [entry])[-RECENT_MAX:]
+        self.rec = (self.gen, entry)
+        self.save_recent_soon()
+
+    def forget_record(self):
+        if self.rec:
+            self.recent = [e for e in self.recent if e is not self.rec[1]]
+            self.rec = None
+            self.save_recent_soon()
+
+    def save_recent_soon(self):
+        """Answers stream in many times a second: save once things settle."""
+        if self.recent_save_src or not self.opt("keep_recent"):
+            return
+
+        def save():
+            self.recent_save_src = None
+            save_recent(self.recent)
+            return False
+        self.recent_save_src = GLib.timeout_add(1500, save)
+
+    def past_text(self, e, hint=""):
+        ans = e.get("a") or "(No answer saved: you asked something else before he finished.)"
+        return f"{hint}You asked ({time_ago(e.get('t'))}): {e['q']}\n{ans}"
+
+    def recall_step(self, d):
+        """↑/↓: step back and forth through your recent questions. The question goes in the
+        text box (Enter asks it again) and his answer from then shows right away."""
+        items = self.recent
+        if self.recall is None:
+            if d > 0:
+                return False
+            if not items:
+                if not self.entry.get_visible():
+                    return False
+                self.say("No recent questions yet. What you ask shows up here.")
+                return True
+            self.recall_back = (self.bubble_text, dict(self.actions), self.help_uri,
+                                self.entry.get_text())
+            i = len(items)
+        else:
+            i = self.recall
+        i += d
+        if i >= len(items):   # past the newest: back to how it was
+            self.recall_stop(clear=True)
+            return True
+        i = max(0, i)
+        self.recall = i
+        e = items[i]
+        if not self.entry.get_visible():
+            self.show_entry()
+        self.entry.set_text(e["q"] if e.get("ask", True) else "")
+        self.entry.set_position(-1)
+        self.help_uri = e.get("uri")
+        n = len(items)
+        self.say(self.past_text(e, f"(Earlier, {n - i} of {n}: ↑ older · ↓ newer · Enter asks again)\n"))
+        return True
+
+    def recall_stop(self, clear=False):
+        """Done stepping: the bubble goes back to what it said, the text box to what you'd
+        typed before pressing ↑."""
+        back, self.recall, self.recall_back = self.recall_back, None, None
+        if clear:
+            self.entry.set_text(back[3] if back else "")
+            self.entry.set_position(-1)
+        if back:
+            self.bubble_text = ""   # so say() starts the old text at the top
+            self.say(back[0])
+            self.actions, self.help_uri = back[1], back[2]
+
+    def show_recent(self, start=0):
+        """Your recent questions, newest first; click one to see what he answered."""
+        self.recall, self.recall_back = None, None
+        if not self.opt("keep_recent"):
+            self.say_actions("I'm not keeping your recent questions (you turned that off).", [
+                ("Start remembering them", lambda: (self.set_keep_recent(True), self.show_recent())),
+                ("Close", lambda: self.say(self.greeting())),
+            ])
+            return
+        if not self.recent:
+            self.say("No recent questions yet. What you ask shows up here, and ↑ in the "
+                     "text box steps back through them.")
+            return
+        per = 7
+        items = list(reversed(self.recent))
+        page = items[start:start + per]
+        acts = []
+        fit = 34   # the box widens to fit about this much on one line
+        for e in page:
+            q = " ".join(e["q"].replace("`", "").split())
+            q = q if len(q) <= fit else q[:fit - 1].rstrip() + "…"
+            acts.append((f"{q} · {time_ago(e.get('t'), short=True)}", lambda e=e: self.show_past(e, start)))
+        if start + per < len(items):
+            acts.append(("Older ›", lambda: self.show_recent(start + per)))
+        if start:
+            acts.append(("‹ Newer", lambda: self.show_recent(max(0, start - per))))
+        acts.append(("Clear the list", self.clear_recent_offer))
+        acts.append(("Close", lambda: self.say(self.greeting())))
+        self.bubble_text = ""
+        self.say_actions(f"Recent questions ({len(items)}), newest first. Click one:", acts)
+
+    def show_past(self, e, start=0):
+        self.help_uri = e.get("uri")
+        acts = [("‹ Recent questions", lambda: self.show_recent(start))]
+        if e.get("ask", True):
+            acts.insert(0, ("Ask it again", lambda: self.ask_again(e["q"])))
+        self.bubble_text = ""
+        self.say_actions(self.past_text(e), acts)
+
+    def ask_again(self, q):
+        self.show_entry()
+        self.entry.set_text(q)
+        self.on_submit(self.entry)
+
+    def clear_recent_offer(self):
+        self.say_actions(f"Forget all {len(self.recent)} recent questions?", [
+            ("Yes, clear them", self.clear_recent),
+            ("No, keep them", lambda: self.show_recent()),
+        ])
+
+    def clear_recent(self):
+        self.recent, self.rec = [], None
+        save_recent([])
+        self.say("Cleared ✓ Nothing is saved now.")
+
+    def set_keep_recent(self, on):
+        self.settings["keep_recent"] = on
+        save_settings(self.settings)
+        if not on:   # off means nothing kept: forget what's saved too
+            self.recent, self.rec = [], None
+            save_recent([])
 
     # ---- asking
     def on_submit(self, entry):
@@ -2505,34 +2885,38 @@ class Tux(Gtk.ApplicationWindow):
             q = "Explain this. If it's an error, how do I fix it?"
             search_text = clip[:300]
         self.gen += 1
+        self.recall, self.recall_back = None, None
         if self.idle_src:
             GLib.source_remove(self.idle_src); self.idle_src = None
+        self.start_record(asked, clip)
+        gen = self.gen
         cmd = self.command_in(asked, clip)
         if cmd:  # "what would this command do?": a breakdown from the docs; it's never run
-            self.say("reading the docs…")
+            self.reply(gen, "reading the docs…")
             threading.Thread(target=self.explain_flow, args=(cmd, self.gen), daemon=True).start()
             return
         if ON_TOP_WORDS.search(q) and not clip:  # "stay on top" / "sit on my dock"
+            self.forget_record()   # a menu, not an answer
             self.on_top_offer()
             return
         target = None if clip else install_target(q)
         if target:  # install / remove / "is X installed": check this machine's real packages
-            self.say("checking apt & snap…")
+            self.reply(gen, "checking apt & snap…")
             threading.Thread(target=self.install_flow, args=(q, self.gen) + target,
                              daemon=True).start()
             return
         if TIP_WORDS.search(q) and not clip:  # tips come from the curated list, instantly, no model
-            self.say("Power moves:\n" + self.kb.tip(3))
+            self.reply(gen, "Power moves:\n" + self.kb.tip(3))
             return
         hp, mans, note = self.kb.search(search_text + (" " + clip[:300] if clip and search_text == q else ""))
         self.help_uri = hp["uri"] if hp else None
         quick = None if (clip or refers) else self.kb.quick(q)
         if quick:  # hand-checked answer: instant, no model
-            self.say(quick + (f"\n📖 {hp['title']} ›" if hp else ""))
+            self.reply(gen, quick + (f"\n📖 {hp['title']} ›" if hp else ""))
             return
         tl = None if (clip or refers) else tldr_answer(self.kb.lib, self.kb.man_names, q)
         if tl:  # a tldr example that clearly matches: instant, and checked by the tldr project
-            self.say(tl)
+            self.reply(gen, tl)
             return
         # instant answer from your notes while the model thinks
         recent = recent_commands() if refers and not clip else None
@@ -2542,7 +2926,7 @@ class Tux(Gtk.ApplicationWindow):
         if recent:
             ctx.append(f"⌨ using your last {len(recent)} terminal commands")
         pre = "\n".join(ctx) + ("\n" if ctx else "")
-        self.say(pre + (f"From your notes:\n`{note[0]}`\n\nthinking…" if note else "thinking…"))
+        self.reply(gen, pre + (f"From your notes:\n`{note[0]}`\n\nthinking…" if note else "thinking…"))
         threading.Thread(target=self.ask, args=(q, self.gen, hp, mans, note, clip, recent),
                          daemon=True).start()
 
@@ -2569,15 +2953,15 @@ class Tux(Gtk.ApplicationWindow):
         add a one-line summary on top. Nothing is ever run."""
         def show(text):
             if gen == self.gen:
-                GLib.idle_add(self.say, text)
+                GLib.idle_add(self.reply, gen, text)
 
         try:
             b = breakdown(cmd, self.kb.lib, self.kb.summaries)
         except Exception as e:  # odd input shouldn't take Tux down
             show(f"Couldn't break that down: {e}")
             return
-        shown = cmd if len(cmd) <= 40 else cmd[:39] + "…"
-        head = f"What `{shown}` would do:"
+        # short: inline; long: the whole command on its own line (wraps, click to copy)
+        head = f"What `{cmd}` would do:" if len(cmd) <= 40 else f"What this would do:\n`{cmd}`"
         body = as_text(b) + "\n(Not run: I only read the docs.)"
         if not (os.path.exists(MODEL) and os.path.exists(SERVER_BIN)):
             show(head + "\n" + body)
@@ -2651,7 +3035,7 @@ class Tux(Gtk.ApplicationWindow):
             ans = None
         if ans:
             if gen == self.gen:
-                GLib.idle_add(self.say, ans)
+                GLib.idle_add(self.reply, gen, ans)
             return
         hp, mans, note = self.kb.search(q)
         self.help_uri = hp["uri"] if hp else None
@@ -2663,7 +3047,7 @@ class Tux(Gtk.ApplicationWindow):
     def ask(self, q, gen, hp, mans, note, clip=None, recent=None):
         def status(msg):
             if gen == self.gen:
-                GLib.idle_add(self.say, msg)
+                GLib.idle_add(self.reply, gen, msg)
 
         if not os.path.exists(MODEL) or not os.path.exists(SERVER_BIN):
             status("My brain isn't installed yet (model or llama-server missing).")
